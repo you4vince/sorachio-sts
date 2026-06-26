@@ -410,14 +410,14 @@ python main.py servers status
 
 ## 8. Model Setup
 
-### LLM Models (already present)
+### LLM Models
 
 | Model | Path | Role |
 |-------|------|------|
 | Qwen3-0.6B-Q8_0 | `models/llm1/Qwen3-0.6B-Q8_0.gguf` | Cognitive Gateway |
 | gemma-3-1b-it-Q8_0 | `models/llm2/gemma-3-1b-it-Q8_0.gguf` | Personality Core |
 
-### STT Model (needs download)
+### STT Model
 
 | Model | Size | Accuracy | Speed |
 |-------|------|----------|-------|
