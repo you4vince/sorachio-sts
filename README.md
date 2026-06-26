@@ -3,10 +3,6 @@
 > **Speech To Speech AI Companion System**
 > *Foundation for a future robotics companion platform*
 
-[![Python 3.13](https://img.shields.io/badge/Python-3.13-blue)](https://python.org)
-[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Architecture: Async](https://img.shields.io/badge/Architecture-Async%20Pipeline-orange)](docs/)
-
 ---
 
 ### 🖥️ System in Action (CLI Showcase)
