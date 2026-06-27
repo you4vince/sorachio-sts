@@ -179,7 +179,13 @@ class MasterBootstrapGuardian:
                 if exe_path:
                     log.info(f"Found Python {version}: {exe_path}")
                     log.info("Relaunching with compatible Python...")
-                    subprocess.run([exe_path] + sys.argv)
+                    try:
+                        subprocess.run([exe_path] + sys.argv)
+                    except KeyboardInterrupt:
+                        # Ctrl+C on Windows is broadcast to this parent too,
+                        # even though the child already handles its own
+                        # shutdown. Swallow it instead of crashing.
+                        pass
                     sys.exit(0)
         
         log.error("No compatible Python version found!")
@@ -207,7 +213,14 @@ class MasterBootstrapGuardian:
             venv_python = VENV_DIR / "bin" / "python"
         
         log.info(f"Restarting with venv Python: {venv_python}")
-        subprocess.run([str(venv_python)] + sys.argv)
+        try:
+            subprocess.run([str(venv_python)] + sys.argv)
+        except KeyboardInterrupt:
+            # On Windows, Ctrl+C is broadcast to this parent launcher too,
+            # even though the child (the real app) already handles its own
+            # graceful shutdown. Without this, the launcher crashes with a
+            # raw KeyboardInterrupt traceback right after the app exits cleanly.
+            pass
         sys.exit(0)
 
     def _is_in_venv(self) -> bool:

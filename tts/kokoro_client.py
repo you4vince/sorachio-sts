@@ -98,7 +98,10 @@ class KokoroTTSClient:
                 )
                 lang_code = "a"
 
-            self._pipeline = KPipeline(lang_code=lang_code)
+            self._pipeline = KPipeline(
+                lang_code=lang_code,
+                repo_id="hexgrad/Kokoro-82M",
+            )
 
             # Warmup synthesis to preload model/voice
             try:
