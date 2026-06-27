@@ -9,7 +9,7 @@ import os
 from pathlib import Path
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 # ---------------------------------------------------------------------------
 # Sub-models
@@ -50,6 +50,14 @@ class STTConfig(BaseModel):
     temperature: float = 0.0
     timeout_s: float = 10.0
 
+    @field_validator("binary_path", mode="after")
+    @classmethod
+    def _ensure_exe_stt(cls, v: str) -> str:
+        """Auto-append .exe on Windows regardless of what YAML says."""
+        if os.name == "nt" and not v.endswith(".exe"):
+            return v + ".exe"
+        return v
+
 
 class LLMInstanceConfig(BaseModel):
     server_url: str
@@ -69,6 +77,14 @@ class LLMConfig(BaseModel):
     cognitive_gateway: LLMInstanceConfig
     personality_core: LLMInstanceConfig
     server_binary: str = "bin/llama-server.exe" if os.name == "nt" else "bin/llama-server"
+
+    @field_validator("server_binary", mode="after")
+    @classmethod
+    def _ensure_exe_llm(cls, v: str) -> str:
+        """Auto-append .exe on Windows regardless of what YAML says."""
+        if os.name == "nt" and not v.endswith(".exe"):
+            return v + ".exe"
+        return v
 
 
 class TTSConfig(BaseModel):
