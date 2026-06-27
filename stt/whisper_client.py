@@ -17,11 +17,9 @@ from __future__ import annotations
 
 import asyncio
 import os
-import struct
 import tempfile
 import wave
 from pathlib import Path
-from typing import Optional
 
 from utils.logging_setup import get_logger
 
@@ -94,7 +92,7 @@ class WhisperClient:
             return False
         return True
 
-    async def transcribe(self, audio_bytes: bytes) -> Optional[str]:
+    async def transcribe(self, audio_bytes: bytes) -> str | None:
         """
         Transcribe raw PCM audio bytes to text.
 
