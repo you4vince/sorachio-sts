@@ -51,6 +51,55 @@ def _clean_transcript(text: str) -> str:
     return text.strip()
 
 
+# Known Whisper hallucination phrases — generated on silence/noise.
+# These are well-documented artefacts of the Whisper model.
+_HALLUCINATION_PHRASES: set[str] = {
+    "thank you",
+    "thank you.",
+    "thanks.",
+    "thanks for watching.",
+    "thanks for watching!",
+    "thank you for watching.",
+    "thank you for watching!",
+    "bye.",
+    "bye!",
+    "bye bye.",
+    "goodbye.",
+    "you.",
+    "you",
+    "hmm.",
+    "hmm",
+    "um.",
+    "uh.",
+    "oh.",
+    "ah.",
+    "so.",
+    "okay.",
+    "yeah.",
+    "yes.",
+    "no.",
+    "...",
+    "the end.",
+    "the end",
+    "subscribe.",
+    "please subscribe.",
+    "like and subscribe.",
+    "silence.",
+    "i'm sorry.",
+}
+
+
+def _is_hallucination(text: str) -> bool:
+    """Return True if the transcript looks like a Whisper hallucination."""
+    normalised = text.strip().lower()
+    if normalised in _HALLUCINATION_PHRASES:
+        return True
+    # Single word of 4 chars or fewer is almost certainly noise
+    if len(normalised.split()) == 1 and len(normalised.rstrip(".,!?")) <= 4:
+        return True
+    return False
+
+
 # ---------------------------------------------------------------------------
 # WhisperClient
 # ---------------------------------------------------------------------------
@@ -149,6 +198,11 @@ class WhisperClient:
             transcript = _clean_transcript(text)
 
             if transcript:
+                # Filter out known Whisper hallucinations (ghost phrases on noise)
+                if _is_hallucination(transcript):
+                    log.debug(f"[STT] Filtered hallucination: {transcript!r}")
+                    return None
+
                 log.info(f"[STT] Transcript: {transcript!r}")
             else:
                 log.debug("[STT] Empty transcript")

@@ -120,27 +120,34 @@ class MasterBootstrapGuardian:
 
     def run(self) -> None:
         """Main entry point for MBG."""
-        self._print_banner()
-        
-        # 1. Check Python version
+        # 1. Check Python version (silent — only warns/relaunches if bad)
         self._check_python_version()
-        
+
         if self.check_only:
+            self._print_banner()
             self._print_status()
             return
-        
-        # 2. Setup virtual environment
+
+        # 2. Setup virtual environment (may re-exec into venv)
         self._setup_venv()
-        
+
+        # ── Fast path: everything already ready ──────────────────────
+        if not self.force and self._is_all_ready():
+            self._print_status_compact()
+            return
+
+        # ── Slow path: run full bootstrap ────────────────────────────
+        self._print_banner()
+
         # 3. Install dependencies
         self._install_dependencies()
-        
+
         # 4. Build binaries
         self._build_binaries()
-        
+
         # 5. Download models
         self._download_models()
-        
+
         # 6. Final status
         self._print_status()
         log.info("MBG: Master Bootstrap Guardian - System ready!")
@@ -154,18 +161,37 @@ class MasterBootstrapGuardian:
         print("=" * 60)
         print()
 
+    def _print_status_compact(self) -> None:
+        """Print a compact one-line status when everything is already ready."""
+        parts = []
+        # Python
+        parts.append(f"Python {sys.version_info.major}.{sys.version_info.minor}")
+        # Venv
+        parts.append("venv ✓")
+        # Binaries
+        for name in BINARIES:
+            path = self._get_binary_path(name)
+            parts.append(f"{name} ✓" if path.exists() else f"{name} ✗")
+        # Models
+        for name, config in MODELS.items():
+            path = config["dir"] / config["file"]
+            if path.exists():
+                size_mb = path.stat().st_size / (1024 * 1024)
+                parts.append(f"{name} ✓ ({size_mb:.0f}MB)")
+            else:
+                parts.append(f"{name} ✗")
+        print(f"[MBG] ✓ System ready — {' │ '.join(parts)}")
+
     def _check_python_version(self) -> None:
         """Check if Python version is compatible."""
         major, minor = sys.version_info[:2]
-        
+
         if major != 3 or not (PYTHON_MIN[1] <= minor <= PYTHON_MAX[1]):
             log.warning(
                 f"Python {major}.{minor} is outside compatible range "
                 f"({PYTHON_MIN[0]}.{PYTHON_MIN[1]} - {PYTHON_MAX[0]}.{PYTHON_MAX[1]})"
             )
             self._relaunch_with_compatible_python()
-        
-        log.info(f"Python {major}.{minor} is compatible")
 
     def _relaunch_with_compatible_python(self) -> None:
         """Find and relaunch with a compatible Python version."""
@@ -188,10 +214,46 @@ class MasterBootstrapGuardian:
         log.error("No compatible Python version found!")
         sys.exit(1)
 
+    def _is_all_ready(self) -> bool:
+        """Fast check: is the entire system already bootstrapped?"""
+        # Must be in venv
+        if not self._is_in_venv():
+            return False
+
+        # Dependencies installed?
+        if not self._are_dependencies_installed():
+            return False
+
+        # All binaries valid?
+        for name, config in BINARIES.items():
+            path = self._get_binary_path(name)
+            if not self._is_binary_valid(path, config["check_args"]):
+                return False
+
+        # All models present?
+        for _name, config in MODELS.items():
+            model_path = config["dir"] / config["file"]
+            if not model_path.exists():
+                return False
+
+        return True
+
+    def _are_dependencies_installed(self) -> bool:
+        """Quick check: can we import critical packages?"""
+        critical_packages = [
+            "httpx", "aiohttp", "pydantic", "sounddevice",
+            "numpy", "rich", "typer", "kokoro",
+        ]
+        for pkg in critical_packages:
+            try:
+                __import__(pkg)
+            except ImportError:
+                return False
+        return True
+
     def _setup_venv(self) -> None:
         """Create and activate virtual environment."""
         if self._is_in_venv():
-            log.info("Already running in virtual environment")
             return
         
         log.info("Setting up virtual environment...")
@@ -222,6 +284,10 @@ class MasterBootstrapGuardian:
 
     def _install_dependencies(self) -> None:
         """Install required Python packages."""
+        if not self.force and self._are_dependencies_installed():
+            log.info("Dependencies already installed, skipping")
+            return
+
         log.info("Installing dependencies...")
         
         # Upgrade pip first

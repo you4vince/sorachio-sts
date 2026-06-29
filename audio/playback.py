@@ -74,6 +74,13 @@ class AudioPlayback:
             if audio_chunk is None:
                 # Sentinel: end of this TTS segment
                 self.playback_active_event.clear()
+                # Notify pipeline that playback is done
+                try:
+                    from core.events import EventType, get_bus
+                    import asyncio
+                    await get_bus().emit(EventType.PLAYBACK_FINISHED, source="playback")
+                except Exception:
+                    pass
                 continue
 
             await self._play_chunk(audio_chunk)

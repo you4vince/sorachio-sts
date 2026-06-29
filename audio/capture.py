@@ -80,6 +80,10 @@ class AudioCapture:
         self._running = False
         self._stream: sd.InputStream | None = None
         self._vad_thread: threading.Thread | None = None
+        # Processing gate: when set, captured speech is discarded (mic is
+        # "logically muted").  VAD still runs so interrupt detection works,
+        # but audio never reaches the STT queue.
+        self._muted = threading.Event()
 
     def start(self, loop: asyncio.AbstractEventLoop) -> None:
         """Start capture in background threads."""
@@ -115,6 +119,16 @@ class AudioCapture:
             self._stream.close()
             self._stream = None
         log.info("[Capture] Stopped")
+
+    def mute(self) -> None:
+        """Logically mute the mic — VAD runs but speech is discarded."""
+        self._muted.set()
+        log.debug("[Capture] Muted")
+
+    def unmute(self) -> None:
+        """Un-mute — resume sending speech segments to STT."""
+        self._muted.clear()
+        log.debug("[Capture] Unmuted")
 
     def _audio_callback(
         self, indata: np.ndarray, frames: int, time_info, status
@@ -216,6 +230,11 @@ class AudioCapture:
             log.debug(
                 f"[VAD] Audio too short ({len(audio_bytes)} bytes < {min_bytes}) — discarding"
             )
+            return
+
+        # ── Mute gate: discard audio while pipeline is busy ──────────
+        if self._muted.is_set():
+            log.debug(f"[VAD] Muted — discarding {len(frames)} frames")
             return
 
         log.debug(f"[VAD] Flushing {len(frames)} frames ({len(audio_bytes)} bytes)")

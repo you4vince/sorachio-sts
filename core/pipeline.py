@@ -215,6 +215,9 @@ class SorachioPipeline:
         # Start audio capture (uses threads internally)
         self._capture.start(loop)
 
+        # Subscribe to playback-finished to unmute the mic
+        self.bus.subscribe(EventType.PLAYBACK_FINISHED, self._on_playback_finished)
+
         # Launch async worker tasks
         self._tasks = [
             asyncio.create_task(self._stt_worker(), name="STTWorker"),
@@ -227,6 +230,8 @@ class SorachioPipeline:
         if self.settings.pipeline.startup_greeting and self._tts._available:
             msg = self.settings.pipeline.startup_message
             log.info(f"[Pipeline] Greeting: {msg!r}")
+            # Mute during greeting playback to avoid capturing TTS output
+            self._capture.mute()
             await self._tts.speak(msg)
 
         log.info("[Pipeline] Running — speak into your microphone")
@@ -276,6 +281,10 @@ class SorachioPipeline:
 
             log.info(f"[Cognitive] Input: {transcript!r}")
 
+            # ── Mute the mic while the pipeline is busy ─────────────────
+            if self._capture:
+                self._capture.mute()
+
             # Cognitive Gateway analysis
             decision = await self._cognitive.analyze(transcript)
             self._cognitive_queue.task_done()
@@ -286,6 +295,9 @@ class SorachioPipeline:
 
             if not decision.get("respond", True):
                 log.info("[Cognitive] Decision: NO RESPONSE (not addressed to AI)")
+                # No response coming — unmute immediately
+                if self._capture:
+                    self._capture.unmute()
                 continue
 
             # Clear interrupt for new turn
@@ -363,6 +375,11 @@ class SorachioPipeline:
         Used by the CLI in --text mode for testing without microphone.
         """
         await self._cognitive_queue.put(text)
+
+    async def _on_playback_finished(self, event) -> None:
+        """Called when TTS playback reaches the end-of-stream sentinel."""
+        if self._capture:
+            self._capture.unmute()
 
     async def shutdown(self) -> None:
         """Graceful shutdown of all components."""
