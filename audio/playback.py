@@ -77,7 +77,6 @@ class AudioPlayback:
                 # Notify pipeline that playback is done
                 try:
                     from core.events import EventType, get_bus
-                    import asyncio
                     await get_bus().emit(EventType.PLAYBACK_FINISHED, source="playback")
                 except Exception:
                     pass
@@ -98,6 +97,8 @@ class AudioPlayback:
                 sd.play(audio, samplerate=self.sample_rate, blocking=True)
             except sd.PortAudioError as e:
                 log.error(f"[Playback] PortAudio error: {e}")
+            except Exception as e:
+                log.error(f"[Playback] Playback error: {e}", exc_info=True)
 
         await loop.run_in_executor(None, _blocking_play)
 

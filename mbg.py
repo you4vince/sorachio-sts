@@ -167,20 +167,20 @@ class MasterBootstrapGuardian:
         # Python
         parts.append(f"Python {sys.version_info.major}.{sys.version_info.minor}")
         # Venv
-        parts.append("venv ✓")
+        parts.append("venv [OK]")
         # Binaries
         for name in BINARIES:
             path = self._get_binary_path(name)
-            parts.append(f"{name} ✓" if path.exists() else f"{name} ✗")
+            parts.append(f"{name} [OK]" if path.exists() else f"{name} [FAIL]")
         # Models
         for name, config in MODELS.items():
             path = config["dir"] / config["file"]
             if path.exists():
                 size_mb = path.stat().st_size / (1024 * 1024)
-                parts.append(f"{name} ✓ ({size_mb:.0f}MB)")
+                parts.append(f"{name} [OK] ({size_mb:.0f}MB)")
             else:
-                parts.append(f"{name} ✗")
-        print(f"[MBG] ✓ System ready — {' │ '.join(parts)}")
+                parts.append(f"{name} [FAIL]")
+        print(f"[MBG] [OK] System ready | {' | '.join(parts)}")
 
     def _check_python_version(self) -> None:
         """Check if Python version is compatible."""
@@ -257,13 +257,20 @@ class MasterBootstrapGuardian:
             return
         
         log.info("Setting up virtual environment...")
-        VENV_DIR.mkdir(parents=True, exist_ok=True)
         
-        # Create venv
-        subprocess.run(
-            [sys.executable, "-m", "venv", str(VENV_DIR)],
-            check=True
-        )
+        # Get venv Python path
+        if os.name == "nt":
+            venv_python = VENV_DIR / "Scripts" / "python.exe"
+        else:
+            venv_python = VENV_DIR / "bin" / "python"
+
+        if not venv_python.exists():
+            VENV_DIR.mkdir(parents=True, exist_ok=True)
+            # Create venv
+            subprocess.run(
+                [sys.executable, "-m", "venv", str(VENV_DIR)],
+                check=True
+            )
         
         # Get venv Python path
         if os.name == "nt":
