@@ -169,7 +169,6 @@ class AudioCapture:
             _log_event(f"Sounddevice callback status warning: {status}", force=True)
         if DEBUG_VERBOSE:
             _log_event(f"Mic callback: shape={indata.shape}, dtype={indata.dtype}, frames={frames}")
-        # Ensure int16 — some Windows drivers deliver float32
         if indata.dtype != np.int16:
             indata = (indata * 32767).clip(-32768, 32767).astype(np.int16)
         # Convert to bytes for webrtcvad
