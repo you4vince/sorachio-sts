@@ -390,29 +390,26 @@ class Bootstrapper:
         else:
             log.info("Whisper model already exists, skipping download.")
 
-        # --- LLM Models ---
+        # --- LLM Models (user-managed, auto-detected) ---
         llm1_dir = self.models_dir / "llm1"
         llm2_dir = self.models_dir / "llm2"
         llm1_dir.mkdir(parents=True, exist_ok=True)
         llm2_dir.mkdir(parents=True, exist_ok=True)
 
-        # Download Qwen3-0.6B for Cognitive Gateway
-        llm1_model = llm1_dir / "Qwen3-0.6B-Q8_0.gguf"
-        if not llm1_model.exists():
-            log.info("Downloading Qwen3-0.6B model for Cognitive Gateway...")
-            url = "https://huggingface.co/unsloth/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q8_0.gguf"
-            urllib.request.urlretrieve(url, llm1_model)
-        else:
-            log.info("Qwen3-0.6B model already exists, skipping download.")
-
-        # Download gemma-3-1b-it for Personality Core
-        llm2_model = llm2_dir / "gemma-3-1b-it-Q8_0.gguf"
-        if not llm2_model.exists():
-            log.info("Downloading gemma-3-1b-it model for Personality Core...")
-            url = "https://huggingface.co/unsloth/gemma-3-1b-it-GGUF/resolve/main/gemma-3-1b-it-Q8_0.gguf"
-            urllib.request.urlretrieve(url, llm2_model)
-        else:
-            log.info("gemma-3-1b-it model already exists, skipping download.")
+        # Check if model directories have .gguf files (user drops them in)
+        for name, model_dir in [("LLM1 (Cognitive Gateway)", llm1_dir), ("LLM2 (Personality Core)", llm2_dir)]:
+            gguf_files = list(model_dir.glob("*.gguf"))
+            main_models = [f for f in gguf_files if "mmproj" not in f.name.lower()]
+            if main_models:
+                log.info(f"{name}: Found model → {main_models[0].name}")
+                mmproj_files = [f for f in gguf_files if "mmproj" in f.name.lower()]
+                if mmproj_files:
+                    log.info(f"  Vision projector → {mmproj_files[0].name}")
+            else:
+                log.warning(
+                    f"{name}: No .gguf model found in {model_dir}/\n"
+                    f"  Download a GGUF model and place it in {model_dir}/"
+                )
 
         # --- Kokoro TTS ---
         log.info("Installing Kokoro TTS dependencies (optional)...")

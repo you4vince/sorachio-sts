@@ -57,11 +57,24 @@ The system is designed from the ground up as a **scalable AI companion operating
 | **Fully Local** | All inference runs on-device via llama.cpp |
 | **Real-Time Streaming** | TTS begins before LLM finishes generating |
 | **Two-LLM Architecture** | Cognitive Gateway + Personality Core |
+| **Model-Agnostic** | Auto-detects any GGUF model — just drop and restart |
+| **Vision Ready** | LLM #2 supports multimodal input via mmproj projector |
 | **Interruptible** | VAD detects user speech, stops playback instantly |
-| **Persistent Memory** | Remembers you across sessions (JSON -> future vector DB) |
+| **Persistent Memory** | Remembers you across sessions (JSON → future vector DB) |
 | **Modular** | Each component is a separate async worker |
 | **Rich CLI UI** | Transient spinners, animated loaders, and cognitive status pills |
 | **Cross-Platform** | Works on macOS, Linux, and Windows |
+
+### Current Model Configuration
+
+| Slot | Model | Size | Role | Vision |
+|------|-------|------|------|--------|
+| LLM #1 | Qwen3.5-0.8B (Q8_0) | 774 MB | Cognitive Gateway (JSON router) | No |
+| LLM #2 | Qwen3.5-2B (Q8_0) | 1.87 GB | Personality Core (conversation) | **Yes** (mmproj) |
+| STT | whisper-base.en | 148 MB | Speech-to-Text | — |
+| TTS | Kokoro | — | Text-to-Speech (in-process) | — |
+
+> **Flexible Model Swapping**: Models are auto-detected from `models/llm1/` and `models/llm2/` directories. Just drop a new `.gguf` file and restart — no config editing required. If an `mmproj*.gguf` file is present alongside the model, vision is automatically enabled.
 
 ---
 
@@ -72,16 +85,16 @@ The system is designed from the ground up as a **scalable AI companion operating
 │                    Sorachio-STS Pipeline                        │
 │                                                                 │
 │  ┌──────────┐    ┌─────────────────────────────────────────┐    │
-│  │Microphone│───▶│ Acoustic Gate (RMS/dBFS)                │    │
+│  │Microphone│───►│ Acoustic Gate (RMS/dBFS)                │    │
 │  └──────────┘    └─────────────┬───────────────────────────┘    │
 │                                ▼                                │
 │                  ┌─────────────────────────────────────────┐    │
 │                  │ Acoustic Echo Cancellation (AEC)        │    │
-│                  │ Reference Signal <─────── Playback      │    │
+│                  │ Reference Signal ◄─────── Playback      │    │
 │                  └─────────────┬───────────────────────────┘    │
 │                                ▼                                │
 │                  ┌──────────────┐    ┌─────────────────────┐    │
-│                  │ AudioCapture │───▶│   STT Queue         │    │
+│                  │ AudioCapture │───►│   STT Queue         │    │
 │                  │    (VAD)     │    │   (asyncio.Queue)   │    │
 │                  └──────────────┘    └────────┬────────────┘    │
 │                        │ interrupt            │                 │
@@ -95,7 +108,7 @@ The system is designed from the ground up as a **scalable AI companion operating
 │                                      ┌──────────────────────┐   │
 │                                      │   Cognitive Worker   │   │
 │                                      │   LLM #1             │   │
-│                                      │   Qwen3-0.6B         │   │
+│                                      │   (auto-detected)    │   │
 │                                      │   → JSON decision    │   │
 │                                      └────────┬─────────────┘   │
 │                                               │ decision        │
@@ -117,8 +130,9 @@ The system is designed from the ground up as a **scalable AI companion operating
 │                                            ▼                    │
 │                           ┌─────────────────────────────────┐   │
 │                           │       Personality Worker        │   │
-│                           │     LLM #2 (gemma-3-1b-it)      │   │
+│                           │   LLM #2 (auto-detected)        │   │
 │                           │   Streaming token generation    │   │
+│                           │   🔮 Vision input (if mmproj)   │   │
 │                           └────────────────┬────────────────┘   │
 │                                            │ token stream       │
 │                                            ▼                    │
@@ -152,10 +166,47 @@ The system is designed from the ground up as a **scalable AI companion operating
 ```
 Python Orchestrator (asyncio event loop)
 |
-+-- HTTP -> llama-server :8001 -- LLM #1 Cognitive Gateway (Qwen3-0.6B-Q8_0)
-+-- HTTP -> llama-server :8002 -- LLM #2 Personality Core (gemma-3-1b-it-Q8_0)
++-- HTTP -> llama-server :8001 -- LLM #1 Cognitive Gateway (auto-detected GGUF)
++-- HTTP -> llama-server :8002 -- LLM #2 Personality Core (auto-detected GGUF + mmproj)
 +-- Subprocess -> whisper-cli    -- STT (whisper-base.en)
 +-- In-process -> Kokoro         -- TTS (kokoro Python library)
+```
+
+### Model Auto-Detection Flow
+
+```
+┌──────────────────────────────────────────────────────┐
+│  User drops new model into models/llm1/ or llm2/     │
+│                                                      │
+│  ┌──────────────┐    ┌───────────────────────────┐   │
+│  │ models/llm1/ │    │ models/llm2/              │   │
+│  │  *.gguf      │    │  *.gguf (main model)      │   │
+│  │              │    │  mmproj*.gguf (vision)     │   │
+│  └──────┬───────┘    └──────────┬────────────────┘   │
+│         │                       │                    │
+│         ▼                       ▼                    │
+│  ┌──────────────────────────────────────────────┐    │
+│  │         Model Scanner (auto-detect)          │    │
+│  │  - Finds largest .gguf → model_path          │    │
+│  │  - Finds mmproj*.gguf → mmproj_path          │    │
+│  │  - Sets has_vision = True/False              │    │
+│  └──────────────────┬───────────────────────────┘    │
+│                     │                                │
+│                     ▼                                │
+│  ┌──────────────────────────────────────────────┐    │
+│  │         Server Manager (launch)              │    │
+│  │  llama-server --model X                      │    │
+│  │    --mmproj Y (if vision)                    │    │
+│  │    --ctx-size 0 (auto from GGUF metadata)    │    │
+│  │    --jinja (auto chat template from GGUF)    │    │
+│  │    --reasoning off/auto                      │    │
+│  └──────────────────────────────────────────────┘    │
+│                                                      │
+│  ✅ No YAML editing needed!                          │
+│  ✅ Chat template auto-loaded from model             │
+│  ✅ Context size auto-detected                       │
+│  ✅ Vision auto-enabled if mmproj present             │
+└──────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -187,7 +238,8 @@ Python Orchestrator (asyncio event loop)
 [cognitive_queue] --------------> [Cognitive Worker]
     |
     |  POST /v1/chat/completions
-    |  to llama-server:8001 (Qwen3)
+    |  to llama-server:8001 (LLM #1, auto-detected)
+    |  --reasoning off (no thinking tokens)
     |
     v JSON decision:
     {
@@ -208,7 +260,9 @@ Python Orchestrator (asyncio event loop)
 [Personality Worker]
     |
     |  POST /v1/chat/completions (stream=true)
-    |  to llama-server:8002 (gemma-3-1b-it)
+    |  to llama-server:8002 (LLM #2, auto-detected)
+    |  --jinja (chat template from GGUF)
+    |  --mmproj (vision projector, if present)
     |
     v token stream: "Hello " "there! " "I " "can " "hear " ...
     |
@@ -238,7 +292,7 @@ Sorachio-STS/
 |
 +-- config/                 # Configuration system
 |   +-- sorachio.yaml       # Master config (edit this!)
-|   +-- settings.py         # Pydantic settings loader
+|   +-- settings.py         # Pydantic settings loader + model auto-scanner
 |
 +-- core/                   # Pipeline orchestrator
 |   +-- pipeline.py         # Master async pipeline
@@ -255,10 +309,11 @@ Sorachio-STS/
 |   +-- kokoro_client.py    # Kokoro streaming TTS client
 |
 +-- cognition/              # LLM #1 -- Cognitive Gateway
-|   +-- cognitive_gateway.py
+|   +-- cognitive_gateway.py  # Model-agnostic JSON decision router
 |
-+-- llm/                    # LLM HTTP clients
-|   +-- llama_client.py     # Async llama-server client
++-- llm/                    # LLM HTTP clients + model detection
+|   +-- llama_client.py     # Async llama-server client (multimodal ready)
+|   +-- model_scanner.py    # Auto-detect GGUF models + mmproj from directories
 |
 +-- context/                # Context Manager
 |   +-- context_manager.py  # Prompt assembly
@@ -268,10 +323,10 @@ Sorachio-STS/
 |   +-- long_term.py        # JSON persistent memory + retrieval
 |
 +-- personality/            # LLM #2 -- Personality Core
-|   +-- personality_core.py # Streaming conversation engine
+|   +-- personality_core.py # Streaming conversation engine (model-agnostic)
 |
 +-- services/               # External service management
-|   +-- server_manager.py   # llama-server lifecycle
+|   +-- server_manager.py   # llama-server lifecycle (mmproj, jinja, reasoning)
 |
 +-- utils/                  # Utilities
 |   +-- logging_setup.py    # Structured logging (Rich + file)
@@ -280,9 +335,9 @@ Sorachio-STS/
 +-- cli/                    # CLI interface
 |   +-- main.py             # All commands (run, text, test-*, ...)
 |
-+-- models/                 # Local model files (auto-downloaded by MBG)
-|   +-- llm1/               # Qwen3-0.6B-Q8_0.gguf
-|   +-- llm2/               # gemma-3-1b-it-Q8_0.gguf
++-- models/                 # Local model files (auto-detected!)
+|   +-- llm1/               # Drop any GGUF model here for Cognitive Gateway
+|   +-- llm2/               # Drop any GGUF model + optional mmproj here
 |   +-- stt/                # ggml-base.en.bin
 |
 +-- bin/                    # Binaries (place pre-built binaries here)
@@ -295,8 +350,8 @@ Sorachio-STS/
 |
 +-- logs/                   # Runtime logs
 |   +-- sorachio.log
-|   +-- llm1_server.log
-|   +-- llm2_server.log
+|   +-- cognitivegateway_server.log
+|   +-- personalitycore_server.log
 |
 +-- .repos/                 # Cloned repositories (auto-managed by MBG)
 |   +-- llama.cpp/
@@ -385,10 +440,28 @@ bin/
 +-- whisper-cli.exe
 +-- ggml.dll
 +-- llama.dll
++-- mtmd.dll            # Required for vision/multimodal support
 +-- ... (other .dll files from the zip)
 ```
 
-#### Step 4 — Clone and Run
+#### Step 4 — Download Models
+
+Download GGUF models and place them in the appropriate directories:
+
+```
+models/
++-- llm1/                           # Cognitive Gateway
+|   +-- YourModel.gguf              # Any instruction-following model
++-- llm2/                           # Personality Core
+|   +-- YourModel.gguf              # Any chat/instruction model
+|   +-- mmproj-YourModel.gguf       # Optional: vision projector
++-- stt/
+    +-- ggml-base.en.bin            # Auto-downloaded by MBG
+```
+
+> **Tip**: Models are auto-detected! The system picks the largest `.gguf` file in each folder as the main model, and any `mmproj*.gguf` as the vision projector.
+
+#### Step 5 — Clone and Run
 
 ```powershell
 git clone https://github.com/izzulgod/sorachio-sts.git
@@ -404,8 +477,9 @@ python main.py text
 MBG runs automatically on first launch and handles everything else:
 - Creates `venv_runtime/` virtual environment
 - Installs all Python packages (including `kokoro` and `misaki[en]`)
-- Downloads AI models (~1.8GB total)
+- Downloads STT model (~148MB)
 - Detects your binaries in `bin/`
+- Auto-scans model directories
 
 ---
 
@@ -454,9 +528,9 @@ MBG runs automatically on first launch and handles everything else:
 - Creates `venv_runtime/` virtual environment
 - Installs all Python packages (including `kokoro`)
 - Clones and compiles `llama.cpp` and `whisper.cpp` into `bin/`
-- Downloads AI models (~1.8GB total)
+- Downloads STT model (~148MB)
 
-> First run takes 5–15 minutes due to model downloads and compilation.
+> First run takes 5–15 minutes due to compilation. Model downloads are user-managed.
 
 ---
 
@@ -468,10 +542,13 @@ Once prerequisites are in place, every subsequent step is handled by MBG:
 |------|-----------|
 | Create virtual environment | ✓ Always |
 | Install Python packages | ✓ Always |
-| Download AI models | ✓ Always |
+| Download STT model | ✓ Always |
 | Detect pre-built binaries | ✓ Always |
 | Build binaries from source | ✓ Linux/macOS only |
+| Auto-detect LLM models | ✓ Always |
+| Auto-detect vision projectors | ✓ Always |
 | Install espeak-ng | ✗ Manual (Windows) |
+| Download LLM models | ✗ User-managed |
 
 ### MBG Commands
 
@@ -482,7 +559,7 @@ python mbg.py --check
 # Force reinstall dependencies and re-download models
 python mbg.py --force
 
-# Download models only
+# Download STT model only
 python mbg.py --models
 
 # Build binaries from source only
@@ -491,12 +568,60 @@ python mbg.py --build
 
 ## 7. Model Setup
 
-### LLM Models (Auto-downloaded by MBG)
+### Swapping Models (Drop & Go)
 
-| Model | Size | Role |
-|-------|------|------|
-| Qwen3-0.6B-Q8_0 | 639MB | Cognitive Gateway |
-| gemma-3-1b-it-Q8_0 | 1.07GB | Personality Core |
+Sorachio-STS uses **model auto-detection** — no config editing required when swapping models:
+
+1. **Download** a GGUF model from [Hugging Face](https://huggingface.co/models?library=gguf)
+2. **Drop** it into `models/llm1/` (Cognitive Gateway) or `models/llm2/` (Personality Core)
+3. **Restart** — the system auto-detects the new model
+
+```bash
+# Example: swap Personality Core to a different model
+# 1. Remove old model
+rm models/llm2/old-model.gguf
+
+# 2. Drop new model
+cp ~/Downloads/Qwen3.5-2B-Q8_0.gguf models/llm2/
+
+# 3. Optionally add vision projector
+cp ~/Downloads/mmproj-Qwen3.5-2B-BF16.gguf models/llm2/
+
+# 4. Restart — auto-detected!
+python main.py run
+```
+
+### What Gets Auto-Detected
+
+| Feature | How it works |
+|---------|-------------|
+| **Model file** | Largest `.gguf` in the directory (excluding mmproj) |
+| **Vision projector** | Any `mmproj*.gguf` file in the same directory |
+| **Context size** | Read from GGUF metadata by llama-server (`--ctx-size 0`) |
+| **Chat template** | Read from GGUF metadata by llama-server (`--jinja`) |
+| **Thinking mode** | Auto-detected from template or controlled via `reasoning` config |
+
+### Recommended Models
+
+#### Cognitive Gateway (LLM #1) — Fast JSON Router
+
+Small, fast models that follow instructions well:
+
+| Model | Size | Speed | Notes |
+|-------|------|-------|-------|
+| **Qwen3.5-0.8B-Q8_0** | 774 MB | ⚡ Fast | Current default, excellent JSON output |
+| Qwen3-0.6B-Q8_0 | 639 MB | ⚡⚡ Fastest | Previous default, slightly less capable |
+| Llama-3.2-1B-Q8_0 | ~1.2 GB | ⚡ Fast | Good alternative |
+
+#### Personality Core (LLM #2) — Conversational + Vision
+
+Larger, more capable models for natural conversation:
+
+| Model | Size | Vision | Notes |
+|-------|------|--------|-------|
+| **Qwen3.5-2B-Q8_0** | 1.87 GB | ✅ (mmproj) | Current default, vision-capable |
+| gemma-3-4b-it-Q4_K_M | ~2.5 GB | ✅ (mmproj) | More capable, needs more RAM |
+| Llama-3.2-3B-Q8_0 | ~3.2 GB | ❌ | Text-only, very capable |
 
 ### STT Model (Auto-downloaded by MBG)
 
@@ -570,6 +695,26 @@ llm:
     n_gpu_layers: 35
 ```
 
+### Model Auto-Detection Config
+
+```yaml
+llm:
+  cognitive_gateway:
+    model_dir: "models/llm1"     # Scanner picks largest .gguf here
+    # model_path: ""             # Leave empty for auto-detect, or set explicit path
+    n_ctx: 0                     # 0 = auto from model metadata
+    reasoning: "off"             # Disable thinking for fast JSON routing
+
+  personality_core:
+    model_dir: "models/llm2"     # Scanner picks largest .gguf + mmproj
+    # model_path: ""             # Leave empty for auto-detect
+    # mmproj_path: ""            # Auto-detected if mmproj*.gguf present
+    n_ctx: 0                     # 0 = auto from model metadata
+    reasoning: "off"             # Disable thinking for direct conversation
+```
+
+> **Override auto-detection**: If you set `model_path` explicitly in the YAML, auto-scan is skipped for that instance. This lets you pin a specific model version.
+
 ### Environment Variables
 
 You can override config values with environment variables:
@@ -582,7 +727,7 @@ export SORACHIO_LOG_LEVEL=DEBUG
 
 ## 10. Cognitive Gateway Explained
 
-**LLM #1** (Qwen3-0.6B) acts as a fast routing and filtering brain. It **never generates conversation** -- only makes structured decisions.
+**LLM #1** acts as a fast routing and filtering brain. It **never generates conversation** -- only makes structured decisions. The Cognitive Gateway is **model-agnostic** — any instruction-following GGUF model can be used.
 
 ### Why a separate Cognitive LLM?
 
@@ -625,14 +770,9 @@ In both text and run modes, the Cognitive Gateway's decision is visually rendere
 
 This UI provides immediate feedback on the AI's internal state (emotion, decision to respond, memory storage, topic, and confidence level) while the system transitions smoothly using transient loading spinners.
 
-### Thinking Mode Disabled
+### Thinking Mode Control
 
-Qwen3 has a built-in reasoning/thinking mode that generates `<think>...</think>` tokens. This is disabled via:
-
-```python
-SYSTEM_PROMPT = """/no_think
-You are a cognitive filter...
-```
+The Cognitive Gateway uses `--reasoning off` at the server level to disable any thinking/reasoning tokens. This is **model-agnostic** — it works with Qwen, Gemma, Llama, or any other model that has a thinking mode. This approach replaces the previous model-specific `/no_think` directive, making the system flexible when swapping models.
 
 This reduces latency from ~3s to ~0.3s for the cognitive decision.
 
@@ -763,7 +903,8 @@ python main.py memory clear [--yes]
 - **Virtual Environment** - Creates and manages `venv_runtime/` isolated from your system Python
 - **Dependency Installation** - Installs all required packages including `kokoro` and `misaki[en]` for TTS
 - **Binary Detection** - Validates existing binaries (handles `.exe` automatically on Windows); builds from source if not found
-- **Model Downloads** - Downloads all required AI models
+- **STT Model Downloads** - Downloads the Whisper STT model
+- **Model Verification** - Checks that LLM model directories contain `.gguf` files and reports vision projector status
 - **Platform Detection** - Handles macOS, Linux, and Windows transparently
 
 ### Usage
@@ -775,7 +916,7 @@ python mbg.py --check
 # Force rebuild everything
 python mbg.py --force
 
-# Download models only
+# Download STT model only
 python mbg.py --models
 
 # Build binaries only
@@ -797,8 +938,8 @@ python mbg.py --version
 | Model | Size | Purpose |
 |-------|------|---------|
 | ggml-base.en.bin | 148MB | Speech-to-Text |
-| Qwen3-0.6B-Q8_0.gguf | 639MB | Cognitive Gateway |
-| gemma-3-1b-it-Q8_0.gguf | 1.07GB | Personality Core |
+
+> **Note**: LLM models are user-managed. Download GGUF models from Hugging Face and place them in `models/llm1/` and `models/llm2/`.
 
 ---
 
@@ -825,6 +966,17 @@ If you want to use pre-built releases instead of building from source:
 3. Place both in the `bin/` folder
 4. Run `python mbg.py --check` to verify
 
+### "No .gguf model found in models/llm1/"
+
+This means you haven't placed a model in the directory. Download a GGUF model and drop it in:
+
+```bash
+# Example: download and place a model
+# Visit https://huggingface.co/models?library=gguf
+# Download your preferred model
+# Place the .gguf file in models/llm1/ or models/llm2/
+```
+
 ### "No module named 'kokoro'" / TTS not working
 
 This means kokoro was not installed into the project's virtual environment. Run MBG to reinstall all dependencies into `venv_runtime/`:
@@ -843,8 +995,8 @@ On Windows, Kokoro also requires **espeak-ng** for the English phonemizer. Downl
    ```
 2. Check server logs:
    ```
-   logs/llm1_server.log
-   logs/llm2_server.log
+   logs/cognitivegateway_server.log
+   logs/personalitycore_server.log
    ```
 3. Try starting manually:
    ```bash
@@ -853,10 +1005,10 @@ On Windows, Kokoro also requires **espeak-ng** for the English phonemizer. Downl
 
 ### "Cognitive Gateway returning garbage JSON"
 
-- Check that the Qwen3 model path is correct in `config/sorachio.yaml`
 - Verify LLM #1 is running: `curl http://127.0.0.1:8001/health`
-- The `/no_think` prefix in the system prompt disables Qwen3 reasoning mode
+- The `reasoning: "off"` setting in config disables thinking mode at the server level
 - Try increasing `max_tokens` in config if response is getting cut off
+- Ensure the model supports instruction following (chat/instruct models work best)
 
 ### "Audio device issues"
 
@@ -879,7 +1031,7 @@ python -c "import sounddevice; print(sounddevice.query_devices())"
 For faster response:
 1. Enable GPU offload: set `n_gpu_layers: -1` in config (requires CUDA/Metal)
 2. Use smaller models (tiny, mini variants)
-3. Reduce `n_ctx` to 1024 if conversations are short
+3. Reduce `n_ctx` to a specific value if conversations are short (otherwise leave at 0 for auto)
 4. Increase `n_threads` to match your CPU core count
 
 ---
@@ -915,7 +1067,7 @@ class ServoController:
 | `actuators/servo.py` | Facial expression servos | Planned |
 | `actuators/led.py` | LED ring for emotional state display | Planned |
 | `memory/vector_ltm.py` | ChromaDB/FAISS semantic memory | Planned |
-| `cognition/vision_gate.py` | Visual cognitive gateway | Planned |
+| `cognition/vision_gate.py` | Visual cognitive gateway (foundation ready via mmproj) | Planned |
 | `core/ros2_bridge.py` | ROS2 topic publisher/subscriber | Planned |
 | `agents/task_agent.py` | Goal-oriented sub-agent (LangGraph) | Planned |
 
@@ -923,8 +1075,8 @@ class ServoController:
 
 ```
 Sorachio Core Brain
-+-- Cognitive Gateway (LLM #1) -- fast routing
-+-- Personality Core (LLM #2) -- conversation
++-- Cognitive Gateway (LLM #1) -- fast routing (model-agnostic)
++-- Personality Core (LLM #2) -- conversation + vision (mmproj ready)
 +-- Vision Agent -- camera + face recognition
 +-- Task Agent -- goal planning + execution
 +-- Emotion Agent -- multi-modal emotion fusion
@@ -946,3 +1098,4 @@ This project is a foundation. All contributions welcome:
 - Vector database LTM implementation
 - ROS2 bridge
 - Multi-modal capabilities
+- Vision pipeline integration

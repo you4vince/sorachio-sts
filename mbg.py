@@ -29,6 +29,12 @@ import urllib.request
 from pathlib import Path
 from typing import Optional
 
+# Force UTF-8 encoding for standard output/error on Windows to prevent encoding crashes
+if sys.platform == "win32":
+    import io
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
+
 # ============================================================================
 # MBG Configuration
 # ============================================================================
@@ -48,7 +54,7 @@ REPOS_DIR = PROJECT_ROOT / ".repos"
 MODELS_DIR = PROJECT_ROOT / "models"
 VENV_DIR = PROJECT_ROOT / "venv_runtime"
 
-# Model configurations
+# Model configurations (only STT is auto-downloaded; LLM models are user-managed)
 MODELS = {
     "stt": {
         "dir": MODELS_DIR / "stt",
@@ -56,17 +62,17 @@ MODELS = {
         "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin",
         "description": "Whisper STT model (148MB)",
     },
+}
+
+# LLM model directories (auto-detected, user-managed)
+LLM_MODEL_DIRS = {
     "llm1": {
         "dir": MODELS_DIR / "llm1",
-        "file": "Qwen3-0.6B-Q8_0.gguf",
-        "url": "https://huggingface.co/unsloth/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q8_0.gguf",
-        "description": "Qwen3-0.6B for Cognitive Gateway (639MB)",
+        "label": "Cognitive Gateway",
     },
     "llm2": {
         "dir": MODELS_DIR / "llm2",
-        "file": "gemma-3-1b-it-Q8_0.gguf",
-        "url": "https://huggingface.co/unsloth/gemma-3-1b-it-GGUF/resolve/main/gemma-3-1b-it-Q8_0.gguf",
-        "description": "gemma-3-1b-it for Personality Core (1.07GB)",
+        "label": "Personality Core",
     },
 }
 
@@ -177,7 +183,7 @@ class MasterBootstrapGuardian:
         for name in BINARIES:
             path = self._get_binary_path(name)
             parts.append(f"{name} [OK]" if path.exists() else f"{name} [FAIL]")
-        # Models
+        # STT model
         for name, config in MODELS.items():
             path = config["dir"] / config["file"]
             if path.exists():
@@ -185,6 +191,18 @@ class MasterBootstrapGuardian:
                 parts.append(f"{name} [OK] ({size_mb:.0f}MB)")
             else:
                 parts.append(f"{name} [FAIL]")
+        # LLM models (auto-detected)
+        for name, config in LLM_MODEL_DIRS.items():
+            model_dir = config["dir"]
+            gguf_files = list(model_dir.glob("*.gguf")) if model_dir.exists() else []
+            main_models = [f for f in gguf_files if "mmproj" not in f.name.lower()]
+            if main_models:
+                model_file = max(main_models, key=lambda f: f.stat().st_size)
+                size_mb = model_file.stat().st_size / (1024 * 1024)
+                vision = " +vision" if any("mmproj" in f.name.lower() for f in gguf_files) else ""
+                parts.append(f"{name} [OK] {model_file.stem} ({size_mb:.0f}MB{vision})")
+            else:
+                parts.append(f"{name} [MISSING]")
         print(f"[MBG] [OK] System ready | {' | '.join(parts)}")
 
     def _check_python_version(self) -> None:
@@ -235,10 +253,19 @@ class MasterBootstrapGuardian:
             if not self._is_binary_valid(path, config["check_args"]):
                 return False
 
-        # All models present?
+        # STT model present?
         for _name, config in MODELS.items():
             model_path = config["dir"] / config["file"]
             if not model_path.exists():
+                return False
+
+        # LLM model directories have .gguf files?
+        for _name, config in LLM_MODEL_DIRS.items():
+            model_dir = config["dir"]
+            if not model_dir.exists():
+                return False
+            gguf_files = [f for f in model_dir.glob("*.gguf") if "mmproj" not in f.name.lower()]
+            if not gguf_files:
                 return False
 
         return True
@@ -688,28 +715,53 @@ class MasterBootstrapGuardian:
             return False
 
     def _download_models(self) -> None:
-        """Download all required models."""
-        log.info("Downloading models...")
-        
+        """Download STT model, preload Kokoro TTS assets, and verify LLM model directories."""
+        log.info("Checking models...")
+
+        # Download auto-downloadable models (STT only)
         for model_name, config in MODELS.items():
             self._download_model(model_name, config)
+
+        # Preload Kokoro TTS assets (huggingface cache)
+        self._preload_kokoro_assets()
+
+        # Verify LLM model directories (user-managed, auto-detected)
+        for name, config in LLM_MODEL_DIRS.items():
+            self._verify_llm_model_dir(name, config)
+
+    def _preload_kokoro_assets(self) -> None:
+        """Preload Kokoro TTS model and voices into local cache to avoid download prompts in main UI."""
+        log.info("Checking Kokoro TTS cache assets...")
+        try:
+            # Import within the function since kokoro is in the virtual environment
+            from kokoro import KPipeline
+            log.info("Preloading Kokoro-82M model and English voices...")
+            # This triggers download of ONNX model and default voices/dictionaries
+            pipeline = KPipeline(lang_code="a", repo_id="hexgrad/Kokoro-82M")
+            # Run a dummy synthesis to ensure phonemizer/misaki databases are cached
+            generator = pipeline("Warmup", voice="af_heart", speed=1.0)
+            for _ in generator:
+                break
+            log.info("Kokoro TTS cache assets ready [OK]")
+        except Exception as e:
+            log.warning(f"Could not preload Kokoro assets during bootstrap: {e}")
 
     def _download_model(self, name: str, config: dict) -> None:
         """Download a single model."""
         model_dir = config["dir"]
         model_path = model_dir / config["file"]
-        
+
         # Create directory
         model_dir.mkdir(parents=True, exist_ok=True)
-        
+
         # Check if model exists
         if not self.force and model_path.exists():
             size_mb = model_path.stat().st_size / (1024 * 1024)
             log.info(f"{name} already exists ({size_mb:.1f}MB)")
             return
-        
+
         log.info(f"Downloading {config['description']}...")
-        
+
         try:
             urllib.request.urlretrieve(config["url"], model_path)
             size_mb = model_path.stat().st_size / (1024 * 1024)
@@ -717,20 +769,45 @@ class MasterBootstrapGuardian:
         except Exception as e:
             log.error(f"Failed to download {name}: {e}")
 
+    def _verify_llm_model_dir(self, name: str, config: dict) -> None:
+        """Verify that a LLM model directory contains .gguf files."""
+        model_dir = config["dir"]
+        label = config["label"]
+
+        model_dir.mkdir(parents=True, exist_ok=True)
+
+        gguf_files = list(model_dir.glob("*.gguf"))
+        main_models = [f for f in gguf_files if "mmproj" not in f.name.lower()]
+        mmproj_files = [f for f in gguf_files if "mmproj" in f.name.lower()]
+
+        if main_models:
+            model_file = max(main_models, key=lambda f: f.stat().st_size)
+            size_mb = model_file.stat().st_size / (1024 * 1024)
+            log.info(f"{name} ({label}): {model_file.name} ({size_mb:.0f}MB)")
+            if mmproj_files:
+                mp = mmproj_files[0]
+                mp_size = mp.stat().st_size / (1024 * 1024)
+                log.info(f"  └─ Vision projector: {mp.name} ({mp_size:.0f}MB)")
+        else:
+            log.warning(
+                f"{name} ({label}): No .gguf model found in {model_dir}/\n"
+                f"  Download a GGUF model and place it in {model_dir}/"
+            )
+
     def _print_status(self) -> None:
         """Print system status."""
         print()
         print("=" * 60)
         print("  System Status")
         print("=" * 60)
-        
+
         # Python
         print(f"  Python: {sys.version_info.major}.{sys.version_info.minor}")
-        
+
         # Virtual environment
         in_venv = self._is_in_venv()
         print(f"  Virtual Environment: {'Active' if in_venv else 'Not Active'}")
-        
+
         # Binaries
         print()
         print("  Binaries:")
@@ -738,10 +815,10 @@ class MasterBootstrapGuardian:
             path = self._get_binary_path(name)
             status = "✓" if path.exists() else "✗"
             print(f"    {status} {name}")
-        
-        # Models
+
+        # STT Model
         print()
-        print("  Models:")
+        print("  STT Model:")
         for name, config in MODELS.items():
             path = config["dir"] / config["file"]
             if path.exists():
@@ -749,7 +826,29 @@ class MasterBootstrapGuardian:
                 print(f"    ✓ {name} ({size_mb:.1f}MB)")
             else:
                 print(f"    ✗ {name} (not downloaded)")
-        
+
+        # LLM Models (auto-detected)
+        print()
+        print("  LLM Models (auto-detected):")
+        for name, config in LLM_MODEL_DIRS.items():
+            model_dir = config["dir"]
+            label = config["label"]
+            gguf_files = list(model_dir.glob("*.gguf")) if model_dir.exists() else []
+            main_models = [f for f in gguf_files if "mmproj" not in f.name.lower()]
+            mmproj_files = [f for f in gguf_files if "mmproj" in f.name.lower()]
+
+            if main_models:
+                model_file = max(main_models, key=lambda f: f.stat().st_size)
+                size_mb = model_file.stat().st_size / (1024 * 1024)
+                vision_tag = " +vision" if mmproj_files else ""
+                print(f"    ✓ {name} ({label}): {model_file.name} ({size_mb:.0f}MB{vision_tag})")
+                if mmproj_files:
+                    mp = mmproj_files[0]
+                    mp_size = mp.stat().st_size / (1024 * 1024)
+                    print(f"      └─ mmproj: {mp.name} ({mp_size:.0f}MB)")
+            else:
+                print(f"    ✗ {name} ({label}): No .gguf model found")
+
         print()
         print("=" * 60)
 

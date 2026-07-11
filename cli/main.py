@@ -24,6 +24,12 @@ import sys
 import warnings
 from pathlib import Path
 
+# Force UTF-8 encoding for standard output/error on Windows to prevent encoding crashes
+if sys.platform == "win32":
+    import io
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
+
 import typer
 from rich.console import Console
 from rich.live import Live
@@ -169,9 +175,9 @@ def run(
     no_servers: bool = typer.Option(False, "--no-servers", help="Skip starting llama-servers"),
 ):
     """Run Sorachio in full voice mode (microphone + speakers)."""
-    _print_banner()
     settings = _load_settings(config)
     _setup_logging(settings)
+    _print_banner()
 
     if no_greeting:
         settings.pipeline.startup_greeting = False
@@ -190,9 +196,9 @@ def text(
     no_servers: bool = typer.Option(False, "--no-servers", help="Skip starting llama-servers"),
 ):
     """Run Sorachio in text input mode (no microphone required)."""
-    _print_banner()
     settings = _load_settings(config)
     _setup_logging(settings)
+    _print_banner()
     asyncio.run(_run_text_mode(settings, single_message=message, no_servers=no_servers))
 
 async def _run_text_mode(settings, single_message=None, no_servers=False):
@@ -220,7 +226,7 @@ async def _run_text_mode(settings, single_message=None, no_servers=False):
     srv_mgr = None
 
     if not no_servers:
-        console.print("\n[cyan]Starting LLM servers...[/cyan]\n")
+        console.print("\n[cyan]Starting LLM servers...[/cyan]")
 
         srv_mgr = ServerManager(settings.llm, root)
 
@@ -483,7 +489,7 @@ class VoiceCLI:
         if self.mode == "run":
             # Stop spinner → clean print → restart spinner for thinking
             self._spin_stop()
-            console.print(f"\n[bold cyan]You:[/bold cyan] {transcript}")
+            console.print(f"[bold cyan]You:[/bold cyan] {transcript}")
             self._spin_start("Thinking…", "yellow")
         else:
             self._spin_label("Thinking…", "yellow")
@@ -552,7 +558,7 @@ class VoiceCLI:
             # ── Print the status capsule row ──────────────────────────────
             sep = "  [dim][/dim]  "
             console.print(
-                "\n[bold dim]  >>> STATUS[/bold dim]  "
+                "  [bold dim]>>> STATUS[/bold dim]  "
                 + emo_pill
                 + sep + r_pill
                 + sep + p_pill
@@ -594,7 +600,7 @@ class VoiceCLI:
         if self.mode == "text":
             console.print("[bold green]Sorachio[/bold green]\n└─ ", end="")
         else:
-            console.print("\n[bold cyan]Sorachio:[/bold cyan] ", end="")
+            console.print("[bold cyan]Sorachio:[/bold cyan] ", end="")
 
     async def on_token(self, event) -> None:
         token = event.data
@@ -612,7 +618,7 @@ class VoiceCLI:
 
     async def on_interrupt(self, event) -> None:
         self._spin_stop()
-        console.print("\n[dim]  ╌ Interrupted[/dim]\n")
+        console.print("  [dim]╌ Interrupted[/dim]")
         if self.mode == "run":
             self._spin_start("Listening…", "cyan")
 
@@ -627,7 +633,7 @@ async def _run_pipeline(settings, voice_mode=True, no_servers=False):
     srv_mgr = None
 
     if not no_servers:
-        console.print("\n[cyan]Starting LLM servers...[/cyan]\n")
+        console.print("\n[cyan]Starting LLM servers...[/cyan]")
 
         srv_mgr = ServerManager(settings.llm, root)
 

@@ -28,11 +28,31 @@ log = get_logger("llm.client")
 # ---------------------------------------------------------------------------
 
 class Message:
-    def __init__(self, role: str, content: str):
+    """
+    Chat message supporting both text-only and multimodal (text + image) content.
+
+    For text-only:
+        Message("user", "Hello!")
+
+    For multimodal (vision):
+        Message("user", "What's in this image?", image_b64="data:image/png;base64,...")
+    """
+
+    def __init__(self, role: str, content: str, image_b64: str | None = None):
         self.role = role
         self.content = content
+        self.image_b64 = image_b64
 
-    def to_dict(self) -> dict[str, str]:
+    def to_dict(self) -> dict[str, Any]:
+        if self.image_b64:
+            # Multimodal format (OpenAI-compatible, supported by llama-server)
+            return {
+                "role": self.role,
+                "content": [
+                    {"type": "text", "text": self.content},
+                    {"type": "image_url", "image_url": {"url": self.image_b64}},
+                ],
+            }
         return {"role": self.role, "content": self.content}
 
 

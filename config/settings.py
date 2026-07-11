@@ -78,8 +78,10 @@ class STTConfig(BaseModel):
 
 class LLMInstanceConfig(BaseModel):
     server_url: str
-    model_path: str
-    n_ctx: int = 2048
+    model_dir: str = ""                # Directory to scan for .gguf files
+    model_path: str = ""               # Auto-detected if empty (scanned from model_dir)
+    mmproj_path: str = ""              # Auto-detected if mmproj*.gguf exists in model_dir
+    n_ctx: int = 0                     # 0 = auto-detect from model metadata
     n_threads: int = 12
     n_gpu_layers: int = 0
     temperature: float = 0.7
@@ -88,6 +90,8 @@ class LLMInstanceConfig(BaseModel):
     server_port: int = 8001
     top_p: float = 0.95
     repeat_penalty: float = 1.1
+    reasoning: str = "auto"            # "on" | "off" | "auto" — controls thinking mode
+    has_vision: bool = False            # Auto-set by model scanner if mmproj detected
 
 
 class LLMConfig(BaseModel):
@@ -215,8 +219,42 @@ def get_project_root() -> Path:
     return _project_root
 
 
+def _auto_scan_models(settings: SorachioSettings) -> None:
+    """
+    Auto-scan model directories and fill in model_path / mmproj_path
+    for any LLM instance that has model_dir set but model_path empty.
+    """
+    from llm.model_scanner import log_scan_summary, scan_model_dir
+
+    root = get_project_root()
+
+    for name, instance in [
+        ("CognitiveGateway", settings.llm.cognitive_gateway),
+        ("PersonalityCore", settings.llm.personality_core),
+    ]:
+        if not instance.model_dir:
+            continue
+
+        # Only auto-scan if model_path is not explicitly set
+        if instance.model_path:
+            continue
+
+        scan_dir = root / instance.model_dir
+        info = scan_model_dir(scan_dir)
+        log_scan_summary(name, info)
+
+        if info.model_path:
+            # Store as relative path (consistent with YAML convention)
+            instance.model_path = str(info.model_path.relative_to(root))
+
+        if info.mmproj_path:
+            instance.mmproj_path = str(info.mmproj_path.relative_to(root))
+
+        instance.has_vision = info.has_vision
+
+
 def load_settings(config_path: str | None = None) -> SorachioSettings:
-    """Load settings from YAML file."""
+    """Load settings from YAML file, then auto-scan model directories."""
     global _settings
 
     if config_path is None:
@@ -234,6 +272,10 @@ def load_settings(config_path: str | None = None) -> SorachioSettings:
         raw = yaml.safe_load(f)
 
     _settings = SorachioSettings(**raw)
+
+    # Auto-detect models from directories
+    _auto_scan_models(_settings)
+
     return _settings
 
 

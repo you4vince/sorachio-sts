@@ -1,12 +1,13 @@
 """
 Sorachio-STS Personality Core (LLM #2)
-Streaming natural conversation engine using gemma-3-1b-it.
+Streaming natural conversation engine — model-agnostic.
 
 Responsibilities:
   - Generate natural, warm, emotionally-aware dialogue
   - Stream tokens to chunk assembler for real-time TTS
   - Maintain companion personality across conversation turns
   - Does NOT make routing or memory decisions (that's LLM #1's job)
+  - Supports vision/multimodal input if model has mmproj projector
 """
 
 from __future__ import annotations
@@ -30,8 +31,9 @@ class PersonalityCore:
     """
     LLM #2: Natural language generation engine.
 
-    Streams tokens from gemma-3-1b-it, assembles them into speech chunks,
-    and puts chunks into the TTS queue.
+    Streams tokens from the loaded model, assembles them into speech chunks,
+    and puts chunks into the TTS queue. Supports any GGUF model loaded
+    by llama-server — model is auto-detected from the models/llm2/ directory.
     """
 
     def __init__(

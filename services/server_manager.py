@@ -40,6 +40,7 @@ class SingleServerManager:
         port: int,
         config: LLMInstanceConfig,
         log_dir: Path,
+        mmproj_path: Path | None = None,
     ):
         self.name = name
         self.binary_path = binary_path
@@ -47,6 +48,7 @@ class SingleServerManager:
         self.port = port
         self.config = config
         self.log_dir = log_dir
+        self.mmproj_path = mmproj_path
         self._process: subprocess.Popen | None = None
         self._log_file = None
 
@@ -55,13 +57,27 @@ class SingleServerManager:
             str(self.binary_path),
             "--model", str(self.model_path),
             "--port", str(self.port),
-            "--ctx-size", str(self.config.n_ctx),
             "--threads", str(self.config.n_threads),
             "--n-gpu-layers", str(self.config.n_gpu_layers),
             "--host", "127.0.0.1",
             "--log-disable",       # suppress verbose server logs to console
             "--no-mmap",
+            "--jinja",             # auto-load chat template from GGUF metadata
         ]
+
+        # Context size: 0 = auto from model metadata (llama-server default)
+        if self.config.n_ctx > 0:
+            cmd.extend(["--ctx-size", str(self.config.n_ctx)])
+
+        # Reasoning/thinking mode control
+        if self.config.reasoning in ("on", "off", "auto"):
+            cmd.extend(["--reasoning", self.config.reasoning])
+
+        # Multimodal vision projector
+        if self.mmproj_path and self.mmproj_path.exists():
+            cmd.extend(["--mmproj", str(self.mmproj_path)])
+            log.info(f"[{self.name}] Vision projector: {self.mmproj_path.name}")
+
         return cmd
 
     async def start(self) -> bool:
@@ -160,6 +176,11 @@ class ServerManager:
                 port=llm_config.cognitive_gateway.server_port,
                 config=llm_config.cognitive_gateway,
                 log_dir=log_dir,
+                mmproj_path=(
+                    project_root / llm_config.cognitive_gateway.mmproj_path
+                    if llm_config.cognitive_gateway.mmproj_path
+                    else None
+                ),
             ),
             "personality_core": SingleServerManager(
                 name="PersonalityCore",
@@ -168,8 +189,14 @@ class ServerManager:
                 port=llm_config.personality_core.server_port,
                 config=llm_config.personality_core,
                 log_dir=log_dir,
+                mmproj_path=(
+                    project_root / llm_config.personality_core.mmproj_path
+                    if llm_config.personality_core.mmproj_path
+                    else None
+                ),
             ),
         }
+
 
     async def start_all(self, wait_ready: bool = True) -> bool:
         """Start all servers. Returns True if all started."""

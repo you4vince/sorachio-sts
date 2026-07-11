@@ -1,12 +1,13 @@
 """
 Sorachio-STS Cognitive Gateway (LLM #1)
-Fast decision layer using Qwen3-0.6B.
+Fast decision layer — model-agnostic structured JSON router.
 
 This is NOT a chatbot.
 It ONLY produces structured JSON decisions.
 
 Features:
-  - Qwen3 no_think mode
+  - Model-agnostic (works with any instruction-following LLM)
+  - Thinking/reasoning disabled at server level (--reasoning off)
   - Robust JSON repair
   - Defensive parsing
   - Stable low-latency behavior
@@ -50,9 +51,7 @@ DEFAULT_DECISION: dict[str, Any] = {
 # System prompt
 # ---------------------------------------------------------------------------
 
-SYSTEM_PROMPT = """/no_think
-
-You are a cognitive routing layer for an AI companion named Sorachio.
+SYSTEM_PROMPT = """You are a cognitive routing layer for an AI companion named Sorachio.
 You are NOT a chatbot.
 You MUST output ONLY valid minified JSON.
 
