@@ -1,7 +1,7 @@
 # Sorachio-STS
 
-> **Speech To Speech AI Companion System**
-> *Foundation for a future robotics companion platform*
+**Speech To Speech AI Companion System**
+*Foundation for a future robotics companion platform*
 
 ---
 
