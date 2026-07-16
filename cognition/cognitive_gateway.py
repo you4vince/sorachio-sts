@@ -69,7 +69,7 @@ Rules:
 - respond=true for greetings, questions, commands, or direct speech to you.
 - topic: a short label describing the subject (e.g. greeting, focus, origin, general, etc.). If the user asks you to look, see, watch, or analyze something visual, set topic to 'visual_analysis'.
 - emotion must be one of: neutral, happy, sad, anxious, frustrated, excited, confused, tired
-- store_memory=true for personal facts, preferences, goals, or important user events.
+- store_memory=true ONLY for important personal facts, preferences, goals, or events about the USER. Set store_memory=false for greetings, small talk, generic questions, or questions about you/Sorachio (e.g. your identity, origin, or capabilities).
 - importance: 0.0 to 1.0 (how important the information is).
 - memory_queries: list of search keywords (max 2) if relevant to search long-term memory.
 
@@ -409,7 +409,10 @@ class CognitiveGateway:
                 result["respond"] = True
 
         # Prevent storing trivial interactions in LTM
-        trivial_topics = {"hello", "hi", "greeting", "greetings", "general", "smalltalk"}
+        trivial_topics = {
+            "hello", "hi", "greeting", "greetings", "general", "smalltalk",
+            "introduction", "identity", "self_introduction", "origin", "greeting_response"
+        }
         if result.get("topic") in trivial_topics or result.get("speech_type") in ("filler", "ambient", "background"):
             result["store_memory"] = False
             if result.get("importance", 0.0) > 0.4:
