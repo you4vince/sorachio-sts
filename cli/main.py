@@ -550,9 +550,7 @@ class VoiceCLI:
             p_color = _PRIORITY_COLORS.get(priority, "yellow")
             p_pill = f"[{p_color}] ⚡ {priority} [/]"
 
-            # Confidence bar (8 blocks)
-            filled   = round(confidence * 8)
-            conf_bar = "[green]" + "█" * filled + "[/green]" + "[dim]" + "░" * (8 - filled) + "[/dim]"
+
 
             # ── Print the status capsule row ──────────────────────────────
             sep = "  [dim][/dim]  "
