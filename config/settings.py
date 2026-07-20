@@ -82,7 +82,9 @@ class LLMInstanceConfig(BaseModel):
     model_path: str = ""               # Auto-detected if empty (scanned from model_dir)
     mmproj_path: str = ""              # Auto-detected if mmproj*.gguf exists in model_dir
     n_ctx: int = 0                     # 0 = auto-detect from model metadata
-    n_threads: int = 12
+    n_batch: int = 512                 # Prompt eval batch size (lower = less peak RAM)
+    n_threads: int = 12                # Threads for token generation
+    n_threads_batch: int = 0           # Threads for prompt eval (0 = default to n_threads)
     n_gpu_layers: int = 0
     temperature: float = 0.7
     max_tokens: int = 512

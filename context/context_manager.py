@@ -58,8 +58,8 @@ class ContextManager:
     ) -> list[dict[str, Any]]:
         """
         Build the full message history for the Personality Core.
-        Includes system prompt (with emotion/topic/LTM context), recent STM,
-        and the new user input (as text or multimodal if image_b64 is provided).
+        Includes system prompt (100% static to maximize KV cache hits), recent STM,
+        and the new user input with injected dynamic context (emotion, topic, LTM, interruption).
         """
         emotion = cognitive_decision.get("emotion", "neutral")
         topic = cognitive_decision.get("topic", "general")
@@ -76,13 +76,8 @@ class ContextManager:
         if recent_entries and recent_entries[-1].metadata.get("interrupted"):
             was_interrupted = True
 
-        # Build system prompt
-        system_content = self._build_system_prompt(
-            emotion=emotion,
-            topic=topic,
-            ltm_entries_text=self.ltm.format_for_context(ltm_entries),
-            was_interrupted=was_interrupted,
-        )
+        # Build 100% static system prompt
+        system_content = self._build_system_prompt()
 
         # Build message list
         messages: list[dict[str, Any]] = [
@@ -93,17 +88,44 @@ class ContextManager:
         recent = await self.stm.get_chat_messages(n=self.max_stm_in_prompt)
         messages.extend(recent)
 
+        # Build dynamic context block for the current turn
+        context_parts = []
+        if self.include_emotional_state and emotion != "neutral":
+            context_parts.append(
+                f"[Current emotional context: The user seems {emotion}. Respond with appropriate empathy and care.]"
+            )
+        if topic and topic not in ("general", "unknown"):
+            context_parts.append(
+                f"[Current topic: {topic}]"
+            )
+        if ltm_entries:
+            ltm_text = self.ltm.format_for_context(ltm_entries)
+            if ltm_text:
+                context_parts.append(ltm_text.strip())
+        if was_interrupted:
+            context_parts.append(
+                "[Context: Your previous response was interrupted by the user. Acknowledge the interruption if natural, and keep your next response brief.]"
+            )
+
+        # Merge dynamic context block into the newest user input
+        context_prefix = "\n".join(context_parts)
+        final_user_content = user_input
+        if context_prefix:
+            final_user_content = f"{context_prefix}\n\n{user_input}"
+
         # Add current user message
         if image_b64:
+            # Multi-modal models like Qwen2-VL require special tags in the text block to locate the image features
+            multimodal_user_content = f"<|vision_start|><|image_pad|><|vision_end|>\n{final_user_content}"
             messages.append({
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": user_input},
+                    {"type": "text", "text": multimodal_user_content},
                     {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}}
                 ]
             })
         else:
-            messages.append({"role": "user", "content": user_input})
+            messages.append({"role": "user", "content": final_user_content})
 
         log.debug(
             f"[Context] Built prompt: {len(messages)} messages, "
@@ -112,45 +134,13 @@ class ContextManager:
         )
         return messages
 
-    def _build_system_prompt(
-        self,
-        emotion: str,
-        topic: str,
-        ltm_entries_text: str,
-        was_interrupted: bool = False,
-    ) -> str:
-        """Construct the system prompt with all contextual additions."""
-        parts = [self.personality_prompt.strip()]
-
-        # Emotional awareness context
-        if self.include_emotional_state and emotion != "neutral":
-            parts.append(
-                f"\n[Current emotional context: The user seems {emotion}. "
-                f"Respond with appropriate empathy and care.]"
-            )
-
-        # Topic context
-        if topic and topic not in ("general", "unknown"):
-            parts.append(
-                f"[Current topic: {topic}]"
-            )
-
-        # LTM memories
-        if ltm_entries_text:
-            parts.append(f"\n{ltm_entries_text}")
-
-        # Interruption context
-        if was_interrupted:
-            parts.append(
-                "\n[Context: Your previous response was interrupted by the user. "
-                "Acknowledge the interruption if natural, and keep your next response brief.]"
-            )
-
-        parts.append(
+    def _build_system_prompt(self) -> str:
+        """Construct a static system prompt to maximize KV Cache reuse."""
+        parts = [
+            self.personality_prompt.strip(),
             f"\nYou are {self.companion_name}. Respond naturally in 1-3 spoken sentences. "
             "Do NOT use markdown, bullet points, or lists. Speak conversationally."
-        )
-
+        ]
         return "\n".join(parts)
 
     async def store_interaction(

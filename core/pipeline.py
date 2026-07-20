@@ -220,6 +220,22 @@ class SorachioPipeline:
             aec=aec_provider,
         )
 
+        # ---- Model Warm-up ----
+        # Send the ACTUAL system prompts so llama-server pre-fills the KV cache.
+        # The first real user message then gets a near-100% cache hit on the system
+        # portion, instead of evaluating hundreds of tokens from scratch.
+        #
+        # IMPORTANT: warm-ups run SEQUENTIALLY (not parallel) to avoid RAM bandwidth
+        # contention. Running both at once causes each model to read weights from
+        # disk/swap simultaneously, halving effective throughput (3.7 tok/s instead of 7+).
+        log.info("[Pipeline] Warming up LLM servers (pre-filling KV cache with system prompts)...")
+        from cognition.cognitive_gateway import SYSTEM_PROMPT as GW_SYSTEM_PROMPT
+        gw_system_prompt = GW_SYSTEM_PROMPT
+        pc_system_prompt = self._context._build_system_prompt()
+
+        await self._llm_gateway.warm_up(system_prompt=gw_system_prompt)
+        await self._llm_personality.warm_up(system_prompt=pc_system_prompt)
+
         log.info("[Pipeline] All components initialized [OK]")
         return True
 

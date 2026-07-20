@@ -532,7 +532,10 @@ python main.py text
 MBG runs automatically on first launch and handles everything else:
 - Creates `venv_runtime/` virtual environment
 - Installs all Python packages (including `kokoro`)
+- Installs system dependencies including Vulkan loader and SPIR-V headers/compilers
 - Clones and compiles `llama.cpp` and `whisper.cpp` into `bin/`
+- **GPU Acceleration**: Dynamically detects Vulkan SDK / GPU tools and compiles `llama-server` with Vulkan GPU offload support (`-DGGML_VULKAN=ON`)
+- **Memory Pinning**: Automatically applies the `cap_ipc_lock` process capability to `llama-server` on Linux to enable zero-swapping memory locking (`mlock`)
 - Downloads STT model (~148MB)
 
 > First run takes 5–15 minutes due to compilation. Model downloads are user-managed.
@@ -883,8 +886,10 @@ python main.py memory clear [--yes]
 
 - **Python Version Management** - Auto-detects and relaunches with compatible Python (3.10–3.12)
 - **Virtual Environment** - Creates and manages `venv_runtime/` isolated from your system Python
-- **Dependency Installation** - Installs all required packages including `kokoro` and `misaki[en]` for TTS
-- **Binary Detection** - Validates existing binaries (handles `.exe` automatically on Windows); builds from source if not found
+- **Dependency & SDK Auto-install** - Installs Python packages and system C dependencies (e.g. Vulkan SDK/SPIR-V compilers, PortAudio) automatically
+- **Binary Detection & Compilation** - Validates existing binaries; builds from source if not found with optimized flags
+- **Dynamic Vulkan GPU Offloading** - Auto-detects Vulkan support on the host machine and compiles `llama-server` with dynamic Vulkan GPU backend (`-DGGML_VULKAN=ON`)
+- **Auto Memory Pinning** - Automatically applies `cap_ipc_lock=+ep` to `./bin/llama-server` on Linux to guarantee zero-swap RAM locking (`mlock`)
 - **STT Model Downloads** - Downloads the Whisper STT model
 - **Model Verification** - Checks that LLM model directories contain `.gguf` files and reports vision projector status
 - **Platform Detection** - Handles macOS, Linux, and Windows transparently
@@ -1010,11 +1015,18 @@ python -c "import sounddevice; print(sounddevice.query_devices())"
 
 ### "High latency"
 
-For faster response:
-1. Enable GPU offload: set `n_gpu_layers: -1` in config (requires CUDA/Metal)
-2. Use smaller models (tiny, mini variants)
-3. Reduce `n_ctx` to a specific value if conversations are short (otherwise leave at 0 for auto)
-4. Increase `n_threads` to match your CPU core count
+For lowest latency (2–5 seconds responses):
+1. **Enable GPU offload**: Set `n_gpu_layers: 99` in `config/sorachio.yaml`. This offloads all model layers to the GPU. On Linux, MBG compiles Vulkan support automatically if Vulkan is detected.
+2. **Compile with GPU acceleration**: If you ran MBG without Vulkan libraries installed initially, install them (e.g. `sudo dnf install vulkan-devel spirv-headers-devel` or `sudo apt install libvulkan-dev spirv-headers`) and rebuild with `python mbg.py --force --build`.
+3. **Lock memory to prevent swap**: Ensure the memory locking limits are configured. If you see memory locking warnings in logs, set limits in `/etc/security/limits.d/llama-memlock.conf`:
+   ```text
+   <username> soft memlock 8388608
+   <username> hard memlock 8388608
+   ```
+   and restart your session. MBG automatically tries to apply `cap_ipc_lock` capability on Linux so root limits aren't strictly required.
+4. **Tune Batch & Threads**:
+   - `n_threads_batch: 8` (matches physical CPU cores for prompt batch processing).
+   - `n_threads: 6` (minimizes synchronization overhead during text generation).
 
 ---
 

@@ -141,6 +141,7 @@ class LlamaClient:
         temperature: float | None = None,
         max_tokens: int | None = None,
         extra_params: dict[str, Any] | None = None,
+        timeout_s: float | None = None,
     ) -> str:
         """
         Non-streaming chat completion.
@@ -153,7 +154,8 @@ class LlamaClient:
         for attempt in range(self.max_retries):
             try:
                 client = await self._get_client()
-                resp = await client.post("/v1/chat/completions", json=payload)
+                timeout_config = httpx.Timeout(connect=10.0, read=timeout_s, write=10.0, pool=5.0) if timeout_s is not None else None
+                resp = await client.post("/v1/chat/completions", json=payload, timeout=timeout_config)
                 resp.raise_for_status()
                 data = resp.json()
                 content = data["choices"][0]["message"]["content"]
@@ -236,3 +238,24 @@ class LlamaClient:
         if extra_params:
             payload.update(extra_params)
         return payload
+
+    async def warm_up(self, system_prompt: str | None = None) -> None:
+        """
+        Trigger a dummy inference request to warm up the model.
+
+        If system_prompt is provided, it is sent as the system message so that
+        llama-server pre-fills and caches the KV for the real system prompt.
+        This means the FIRST real user request benefits from a full cache hit
+        on the system portion, instead of re-evaluating it from scratch.
+        """
+        log.info(f"Warming up model at {self.base_url} (pre-filling KV cache)...")
+        try:
+            messages: list[dict] = []
+            if system_prompt:
+                messages.append({"role": "system", "content": system_prompt})
+            messages.append({"role": "user", "content": "hi"})
+            # max_tokens=1 generates the absolute minimum, with 120s timeout
+            await self.complete(messages, max_tokens=1, timeout_s=120.0)
+            log.info(f"Model at {self.base_url} is warmed up (KV cache pre-filled) [OK]")
+        except Exception as e:
+            log.warning(f"Model warm-up failed for {self.base_url}: {e}")

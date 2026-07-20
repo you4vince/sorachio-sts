@@ -60,13 +60,21 @@ class SingleServerManager:
             "--threads", str(self.config.n_threads),
             "--n-gpu-layers", str(self.config.n_gpu_layers),
             "--host", "127.0.0.1",
-            "--no-mmap",
-            "--cache-ram", "0",
+            "--parallel", "1",
+            "--mlock",
         ]
+
+        # Add threads-batch parameter if set
+        if hasattr(self.config, 'n_threads_batch') and self.config.n_threads_batch > 0:
+            cmd.extend(["--threads-batch", str(self.config.n_threads_batch)])
 
         # Context size: 0 = auto from model metadata (llama-server default)
         if self.config.n_ctx > 0:
             cmd.extend(["--ctx-size", str(self.config.n_ctx)])
+
+        # Batch size for prompt eval (lower = less peak RAM, default 2048)
+        if hasattr(self.config, 'n_batch') and self.config.n_batch > 0:
+            cmd.extend(["--batch-size", str(self.config.n_batch)])
 
         # Reasoning/thinking mode control
         if self.config.reasoning in ("on", "off", "auto"):
@@ -105,11 +113,24 @@ class SingleServerManager:
         log_path = self.log_dir / f"{self.name.lower().replace(' ', '_')}_server.log"
         self._log_file = open(log_path, "w", encoding="utf-8")
 
+        def _raise_memlock() -> None:
+            """Raise RLIMIT_MEMLOCK to hard limit before exec."""
+            try:
+                import resource
+                soft, hard = resource.getrlimit(resource.RLIMIT_MEMLOCK)
+                # Try to set soft = hard (no root needed)
+                if hard == resource.RLIM_INFINITY or hard > soft:
+                    new_soft = hard if hard != resource.RLIM_INFINITY else resource.RLIM_INFINITY
+                    resource.setrlimit(resource.RLIMIT_MEMLOCK, (new_soft, hard))
+            except Exception:
+                pass  # Non-fatal: mlock may still warn but won't crash
+
         try:
             self._process = subprocess.Popen(
                 cmd,
                 stdout=self._log_file,
                 stderr=self._log_file,
+                preexec_fn=_raise_memlock if os.name != "nt" else None,
                 creationflags=subprocess.CREATE_NEW_PROCESS_GROUP
                 if os.name == "nt"
                 else 0,

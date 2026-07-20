@@ -81,7 +81,12 @@ BINARIES = {
     "llama-server": {
         "repo": "llama.cpp",
         "url": "https://github.com/ggerganov/llama.cpp",
-        "build_args": ["-DLLAMA_BUILD_SERVER=ON"],
+        "build_args": [
+            "-DLLAMA_BUILD_SERVER=ON",
+            "-DGGML_AVX2=ON",
+            "-DGGML_FMA=ON",
+            "-DGGML_F16C=ON",
+        ],
         "check_args": ["--version"],
     },
     "whisper-cli": {
@@ -334,31 +339,38 @@ class MasterBootstrapGuardian:
 
         # Map: package_manager -> list of packages to install
         # Includes PortAudio, libsndfile, PulseAudio (backend for PortAudio),
-        # and ALSA libs/plugins so audio actually works on Linux / WSL.
+        # ALSA libs/plugins so audio works on Linux/WSL, and Vulkan/SPIR-V
+        # development libraries so llama-server compiles with GPU acceleration.
         sys_deps: dict[str, list[str]] = {
             "apt-get": [
                 "libportaudio2", "portaudio19-dev", "libsndfile1",
-                "pulseaudio", "libpulse-dev", "libasound2-dev", "libasound2-plugins"
+                "pulseaudio", "libpulse-dev", "libasound2-dev", "libasound2-plugins",
+                "libvulkan-dev", "vulkan-tools", "spirv-headers", "glslang-tools", "shaderc"
             ],
             "dnf": [
                 "portaudio", "portaudio-devel", "libsndfile",
-                "pulseaudio", "pulseaudio-libs-devel", "alsa-lib-devel", "alsa-plugins-pulseaudio"
+                "pulseaudio", "pulseaudio-libs-devel", "alsa-lib-devel", "alsa-plugins-pulseaudio",
+                "vulkan-devel", "vulkan-headers", "spirv-headers-devel", "spirv-tools", "glslc", "glslang"
             ],
             "yum": [
                 "portaudio", "portaudio-devel", "libsndfile",
-                "pulseaudio", "pulseaudio-libs-devel", "alsa-lib-devel", "alsa-plugins-pulseaudio"
+                "pulseaudio", "pulseaudio-libs-devel", "alsa-lib-devel", "alsa-plugins-pulseaudio",
+                "vulkan-devel", "vulkan-headers", "spirv-headers-devel", "spirv-tools", "glslc", "glslang"
             ],
             "pacman": [
                 "portaudio", "libsndfile",
-                "pulseaudio", "alsa-lib", "pulseaudio-alsa"
+                "pulseaudio", "alsa-lib", "pulseaudio-alsa",
+                "vulkan-devel", "spirv-headers", "spirv-tools", "shaderc"
             ],
             "zypper": [
                 "portaudio", "portaudio-devel", "libsndfile",
-                "pulseaudio", "alsa-devel", "alsa-plugins-pulse"
+                "pulseaudio", "alsa-devel", "alsa-plugins-pulse",
+                "vulkan-devel", "vulkan-headers", "spirv-headers-devel", "spirv-tools", "shaderc"
             ],
             "apk": [
                 "portaudio-dev", "libsndfile-dev",
-                "pulseaudio-dev", "alsa-lib-dev", "alsa-plugins-pulse"
+                "pulseaudio-dev", "alsa-lib-dev", "alsa-plugins-pulse",
+                "vulkan-headers", "shaderc"
             ],
         }
 
@@ -646,7 +658,26 @@ class MasterBootstrapGuardian:
         build_dir = repo_path / "build"
         
         # Configure
-        cmake_args = ["cmake", "-B", str(build_dir)] + config["build_args"]
+        build_args = list(config["build_args"])
+        if name == "llama-server":
+            # Auto-detect Vulkan capability on target machine
+            has_vulkan = False
+            if shutil.which("vulkaninfo"):
+                has_vulkan = True
+            elif Path("/usr/include/vulkan/vulkan.h").exists() or Path("/usr/local/include/vulkan/vulkan.h").exists():
+                has_vulkan = True
+            elif sys.platform == "win32" and os.environ.get("VULKAN_SDK"):
+                has_vulkan = True
+
+            if has_vulkan:
+                log.info("[MBG] Vulkan support detected on host. Enabling Vulkan GPU backend...")
+                if "-DGGML_VULKAN=ON" not in build_args:
+                    build_args.append("-DGGML_VULKAN=ON")
+            else:
+                log.info("[MBG] No Vulkan SDK or GPU tools detected. Reverting to optimized CPU build...")
+                build_args = [arg for arg in build_args if "GGML_VULKAN" not in arg]
+
+        cmake_args = ["cmake", "-B", str(build_dir)] + build_args
         subprocess.run(cmake_args, cwd=repo_path, check=True)
         
         # Compile
@@ -668,6 +699,20 @@ class MasterBootstrapGuardian:
         if src_bin.exists():
             shutil.copy(src_bin, binary_path)
             log.info(f"{name} built successfully")
+            # On Linux, apply cap_ipc_lock so llama-server can mlock() model weights
+            # without root (prevents model swapping under memory pressure)
+            if name == "llama-server" and os.name != "nt":
+                try:
+                    result = subprocess.run(
+                        ["sudo", "setcap", "cap_ipc_lock=+ep", str(binary_path)],
+                        capture_output=True, text=True, timeout=10
+                    )
+                    if result.returncode == 0:
+                        log.info(f"{name}: cap_ipc_lock capability set (mlock enabled)")
+                    else:
+                        log.warning(f"{name}: could not set cap_ipc_lock — mlock may fail (run: sudo setcap cap_ipc_lock=+ep {binary_path})")
+                except Exception as e:
+                    log.warning(f"{name}: setcap failed: {e}")
         else:
             log.warning(f"Could not find {name} binary after build")
 
