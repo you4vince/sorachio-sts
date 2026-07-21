@@ -171,7 +171,7 @@ class WhisperClient:
         model_size: str = "base",
         language: str | None = None,
         threads: int = 4,
-        beam_size: int = 5,
+        beam_size: int = 1,
         temperature: float = 0.0,
         timeout_s: float = 10.0,
         device: str = "cpu",
@@ -273,6 +273,26 @@ class WhisperClient:
             log.debug("[STT] Audio too short, skipping")
             return None
 
+        # Debug: save first 3 audio segments to WAV files for offline analysis
+        if not hasattr(self, '_debug_save_count'):
+            self._debug_save_count = 0
+        if self._debug_save_count < 3:
+            try:
+                import wave
+                from pathlib import Path
+                debug_dir = Path("logs/debug_audio")
+                debug_dir.mkdir(parents=True, exist_ok=True)
+                wav_path = debug_dir / f"stt_input_{self._debug_save_count}.wav"
+                with wave.open(str(wav_path), "wb") as wf:
+                    wf.setnchannels(1)
+                    wf.setsampwidth(2)  # 16-bit
+                    wf.setframerate(16000)
+                    wf.writeframes(audio_bytes)
+                log.info(f"[STT] Debug: saved audio to {wav_path} ({len(audio_bytes)} bytes)")
+                self._debug_save_count += 1
+            except Exception as save_err:
+                log.warning(f"[STT] Debug save failed: {save_err}")
+
         loop = asyncio.get_event_loop()
 
         try:
@@ -299,13 +319,20 @@ class WhisperClient:
         Language routing (auto mode):
             We run detect_language() first (extremely fast, ~0.02s) to get
             probabilities. We sum Indonesian and regional candidates (ms, jw, su)
-            and compare against English (en). We then force Whisper to transcribe
-            using either 'id' or 'en'. This completely prevents Whisper from
-            misdetecting background noise or short speech as random languages
-            (like Arabic, French, etc.) and outputting incorrect scripts.
+            and compare against English (en) with a bias correction factor.
+            The Whisper base model has a massive English prior (~43% on silence),
+            so Indonesian probabilities are multiplied by a correction factor
+            to compensate. We then force Whisper to transcribe using either
+            'id' or 'en' to prevent random language misdetection.
         """
         try:
             audio = _pcm_to_float32(audio_bytes)
+            audio_duration_s = len(audio) / 16000.0
+
+            log.info(
+                f"[STT] Processing audio: {len(audio_bytes)} bytes, "
+                f"{audio_duration_s:.1f}s"
+            )
 
             # In auto mode: run fast language candidate check first
             if self.language is None:
@@ -319,20 +346,30 @@ class WhisperClient:
                     su_prob = probs.get("su", 0.0)   # Sundanese
                     en_prob = probs.get("en", 0.0)
                     
+                    # Sum all Indonesian-family language probabilities
                     total_id_prob = id_prob + ms_prob + jw_prob + su_prob
                     
-                    # Log language detection probabilities
-                    log.debug(
-                        f"[STT] Candidate probabilities — id/ms/jw/su: {total_id_prob:.3f}, en: {en_prob:.3f}"
+                    # Bias correction: Whisper base model gives English ~43%
+                    # on pure silence due to training data imbalance. Indonesian
+                    # candidates are suppressed by 20-50x. Apply a 3x boost to
+                    # Indonesian family probabilities to level the field.
+                    corrected_id_prob = total_id_prob * 3.0
+                    
+                    log.info(
+                        f"[STT] Language detect — "
+                        f"en: {en_prob:.3f} | "
+                        f"id+ms+jw+su: {total_id_prob:.3f} (corrected: {corrected_id_prob:.3f})"
                     )
                     
-                    # Require a confident threshold (0.15) to route to Indonesian;
-                    # otherwise default to English. This prevents static or short English
-                    # words from being misrouted and translated to Indonesian.
-                    if total_id_prob > en_prob and total_id_prob > 0.15:
+                    # Route to Indonesian if the corrected probability exceeds
+                    # English, OR if raw Indonesian probability is above a low
+                    # threshold (catches clear Indonesian even with noisy probs)
+                    if corrected_id_prob > en_prob or total_id_prob > 0.08:
                         target_lang = "id"
                     else:
                         target_lang = "en"
+                        
+                    log.info(f"[STT] Language route → {target_lang}")
                 except Exception as detect_err:
                     log.warning(f"[STT] Language detection failed: {detect_err}")
                     target_lang = "en"
@@ -346,11 +383,8 @@ class WhisperClient:
                 language=target_lang,
                 beam_size=self.beam_size,
                 temperature=self.temperature,
-                vad_filter=True,
-                vad_parameters=dict(
-                    min_silence_duration_ms=300,
-                    speech_pad_ms=200,
-                ),
+                vad_filter=False,  # Audio is pre-filtered by capture.py VAD; disabling secondary VAD speeds up transcription by 1s
+                initial_prompt="Sorachio is an AI companion created by izzulgod. Conversation in English and Indonesian.",
                 # Prevent repetition loops (hallucinations)
                 compression_ratio_threshold=2.0,   # Strict limit on highly repetitive text
                 log_prob_threshold=-1.0,
@@ -363,9 +397,10 @@ class WhisperClient:
             # Not calling list() here causes the pipeline to silently stall.
             segments = list(segments_gen)
 
-            log.debug(
+            log.info(
                 f"[STT] Transcribed | lang={target_lang} | "
-                f"whisper_detected={info.language} (prob={info.language_probability:.2f})"
+                f"whisper_detected={info.language} (prob={info.language_probability:.2f}) | "
+                f"segments={len(segments)}"
             )
 
             # Collect all segment texts
@@ -376,12 +411,12 @@ class WhisperClient:
             if transcript:
                 # Filter out known Whisper hallucinations
                 if _is_hallucination(transcript):
-                    log.debug(f"[STT] Filtered hallucination: {transcript!r}")
+                    log.info(f"[STT] Filtered hallucination: {transcript!r}")
                     return None
 
-                log.info(f"[STT] Transcript ({target_lang}): {transcript!r}")
+                log.info(f"[STT] ✓ Result ({target_lang}): {transcript!r}")
             else:
-                log.debug("[STT] Empty transcript")
+                log.info("[STT] Empty transcript (no speech detected)")
 
             return transcript if transcript else None
 

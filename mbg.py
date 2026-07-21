@@ -751,16 +751,55 @@ class MasterBootstrapGuardian:
             return False
 
     def _download_models(self) -> None:
-        """Verify LLM model directories and ensure Piper model dir exists."""
+        """Ensure STT, TTS, and LLM model dependencies are fully downloaded upfront."""
         log.info("Checking models...")
 
-        # Verify LLM model directories (user-managed, auto-detected)
+        # 1. Verify LLM model directories (user-managed, auto-detected)
         for name, config in LLM_MODEL_DIRS.items():
             self._verify_llm_model_dir(name, config)
 
-        # Create Piper models directory
+        # 2. Pre-download STT Whisper model (small / base)
+        try:
+            stt_model_name = "small"
+            yaml_path = PROJECT_ROOT / "config" / "sorachio.yaml"
+            if yaml_path.exists():
+                import yaml
+                with open(yaml_path, "r", encoding="utf-8") as f:
+                    cfg_data = yaml.safe_load(f)
+                    stt_model_name = cfg_data.get("stt", {}).get("model_size", "small")
+            
+            log.info(f"[MBG] Verifying Whisper STT model ('{stt_model_name}')...")
+            from faster_whisper import download_model
+            download_model(stt_model_name)
+            log.info(f"[MBG] Whisper STT model ('{stt_model_name}') is ready [OK]")
+        except Exception as e:
+            log.warning(f"[MBG] STT model verification: {e}")
+
+        # 3. Pre-download Piper TTS voice models
         pip_models_dir = MODELS_DIR / "tts"
         pip_models_dir.mkdir(parents=True, exist_ok=True)
+
+        tts_voices = ["en_US-lessac-medium", "id_ID-news_tts-medium"]
+        for voice_name in tts_voices:
+            onnx_file = pip_models_dir / f"{voice_name}.onnx"
+            json_file = pip_models_dir / f"{voice_name}.onnx.json"
+            if not onnx_file.exists() or not json_file.exists():
+                log.info(f"[MBG] Pre-downloading TTS voice '{voice_name}'...")
+                lang_parts = voice_name.split("-")
+                lang_code = lang_parts[0].replace("_", "/")
+                voice_code = lang_parts[1]
+                quality = lang_parts[2]
+                base_url = f"https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/{lang_code}/{voice_code}/{quality}/{voice_name}"
+                try:
+                    if not onnx_file.exists():
+                        urllib.request.urlretrieve(f"{base_url}.onnx", onnx_file)
+                    if not json_file.exists():
+                        urllib.request.urlretrieve(f"{base_url}.onnx.json", json_file)
+                    log.info(f"[MBG] TTS voice '{voice_name}' downloaded successfully [OK]")
+                except Exception as e:
+                    log.warning(f"[MBG] Failed to download TTS voice '{voice_name}': {e}")
+            else:
+                log.info(f"[MBG] TTS voice '{voice_name}' is ready [OK]")
 
     def _download_model(self, name: str, config: dict) -> None:
         """Download a single model."""

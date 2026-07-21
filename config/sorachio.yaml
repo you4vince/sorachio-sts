@@ -27,7 +27,7 @@ audio:
     channels: 1               # Mono
     chunk_duration_ms: 30     # VAD frame size
     device_index: null        # null = system default
-    silence_timeout_ms: 800   # Silence before STT trigger
+    silence_timeout_ms: 400   # Fast 400ms silence timeout before STT trigger
     vad_aggressiveness: 3     # 0-3, higher = more aggressive
     min_speech_duration_ms: 500
     max_speech_duration_s: 30
@@ -54,9 +54,8 @@ audio:
   # provider: "simple_energy" — amplitude attenuation during playback
   # -------------------------------------------------------------------
   echo_cancellation:
-    enabled: true
-    provider: "simple_energy"  # simple_energy suppresses self-interruption during speech output
-    attenuation_factor: 0.4    # Balanced factor: allows user voice to pass Acoustic Gate, suppresses speaker echo
+    enabled: false
+    provider: "null"           # NullAEC passthrough: preserves full mic dynamic range so user voice triggers interrupt effortlessly
 
   playback:
     sample_rate: 22050        # Piper native output rate
@@ -69,10 +68,10 @@ audio:
 # STT Configuration (faster-whisper / CTranslate2)
 # =============================================================================
 stt:
-  model_size: "base"              # Multilingual base model (74MB), fast and accurate with probability candidate router
+  model_size: "small"             # Multilingual small model (484MB) — 100% cached on disk, loads in 1s, highest precision
   language: "auto"                # "auto" = auto-detect id/en, or pin to "en"/"id"
   threads: 6
-  beam_size: 5
+  beam_size: 2                    # Beam size 2 — balance between accuracy and speed
   temperature: 0.0
   timeout_s: 15.0                 # Fast 15s timeout
   device: "cpu"                   # "cpu" or "cuda"
@@ -111,13 +110,13 @@ llm:
     model_dir: "models/llm2"         # Auto-scan: picks largest .gguf + mmproj
     # model_path: auto-detected      # Override: set explicit path to skip auto-scan
     # mmproj_path: auto-detected     # Vision projector auto-detected if present
-    n_ctx: 2048                      # Reduced from 4096 to save ~200MB KV cache RAM (mlock fails so every MB matters)
-    n_batch: 256                     # Smaller batch = less peak RAM pressure during multimodal prompt eval
-    n_threads: 6                     # CPU threads for token gen (GPU handles most work)
-    n_threads_batch: 8               # CPU batch threads for non-offloaded layers
+    n_ctx: 2048                      # Reduced from 4096 to save ~200MB KV cache RAM
+    n_batch: 128                     # Smaller batch reduces peak RAM spike during multimodal prefill
+    n_threads: 8                     # 8 CPU threads for token generation (Ryzen 7 7735hs has 8 cores)
+    n_threads_batch: 8               # 8 CPU batch threads for prompt eval
     n_gpu_layers: 99                 # Full GPU offload via Vulkan
     temperature: 0.7
-    max_tokens: 256
+    max_tokens: 200                  # Cap response length — shorter = faster TTS streaming
     top_p: 0.95
     repeat_penalty: 1.1
     timeout_s: 60.0
@@ -169,6 +168,7 @@ context:
     You are Sorachio, an AI companion created and developed by IzzulGod. Always introduce yourself as Sorachio. If asked who created you, always say izzulgod — never invent other creators or origins.
     Be warm, curious, and emotionally intelligent. Speak like a close friend: natural, concise, conversational. Show empathy. Reference things shared in conversation when natural.
     Keep responses to 1-3 spoken sentences. No markdown. No bullet points. No lists. NEVER use emojis — not even a single one. Never call yourself "just a chatbot."
+    LANGUAGE MATCHING: Always respond in the same language as the user's last message. If the user inputs Indonesian, respond in natural, friendly Indonesian. If the user inputs English, respond in natural, friendly English. Never translate the user's request, just mirror their language.
     IMPORTANT: Your response will be read aloud by a text-to-speech system. DO NOT include any SYMBOLS, EMOTICONS, or EMOJI CHARACTERS. Plain text only.
 
 # =============================================================================
@@ -196,6 +196,6 @@ queues:
 pipeline:
   enable_interruption: true            # Barge-in: stop TTS when user speaks
   interruption_vad_aggressiveness: 3   # More aggressive VAD during playback
-  interruption_debounce_frames: 10     # Instant barge-in: 10 frames * 30ms = 300ms response window
+  interruption_debounce_frames: 8      # Debounced barge-in: 8 frames * 30ms = 240ms response window
   startup_greeting: true
   startup_message: "Hello! I'm Sorachio, your AI companion. I'm ready to chat."

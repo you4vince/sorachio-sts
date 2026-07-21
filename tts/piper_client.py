@@ -17,12 +17,9 @@ Features:
 from __future__ import annotations
 
 import asyncio
-import io
 import json
 import os
-import struct
 import urllib.request
-import wave
 from pathlib import Path
 
 import numpy as np
@@ -181,14 +178,12 @@ class PiperTTSClient:
                     )
 
             if loaded_any:
-                # Warmup with a short synthesis
+                # Warmup with a short synthesis to JIT-compile ONNX kernels
                 try:
                     first_lang = next(iter(self._voices))
                     voice_obj = self._voices[first_lang]
-                    audio_buf = io.BytesIO()
-                    with wave.open(audio_buf, "wb") as wav_file:
-                        voice_obj.synthesize("Hello", wav_file)
-                    log.info("[TTS] Piper warmup complete")
+                    warmup_chunks = list(voice_obj.synthesize("Hello"))
+                    log.info(f"[TTS] Piper warmup complete ({len(warmup_chunks)} chunks)")
                 except Exception as warmup_error:
                     log.warning(f"[TTS] Warmup failed: {warmup_error}")
 
@@ -252,28 +247,25 @@ class PiperTTSClient:
 
         return onnx_path
 
-    def set_language(self, lang: str) -> None:
+    def set_language(self, lang: str, from_stt: bool = False) -> None:
         """
         Set the active language for voice routing.
 
         Called by the pipeline after STT detects the spoken language.
-        Valid values: 'id', 'en', or any ISO 639-1 code.
-        Falls back to English for unrecognized languages.
+        If set from STT, lock the language for the current response turn so naive
+        text langdetect on generated LLM tokens cannot overwrite the spoken voice.
         """
-        if lang in self._voices:
-            if lang != self._current_lang:
-                log.debug(
-                    f"[TTS] Language switched: {self._current_lang} → {lang}"
-                )
-            self._current_lang = lang
-        else:
-            # Fallback to English for unsupported languages
-            if lang != self._current_lang:
-                log.debug(
-                    f"[TTS] Unsupported language '{lang}', "
-                    f"falling back to 'en'"
-                )
-            self._current_lang = "en"
+        if from_stt:
+            self._stt_lang_locked = True
+
+        # If language was explicitly set by STT for this turn, ignore naive text langdetect
+        if not from_stt and getattr(self, "_stt_lang_locked", False):
+            return
+
+        target = lang if lang in ("id", "en") else "en"
+        if target != getattr(self, "_current_lang", "en"):
+            log.info(f"[TTS] Voice language switched: {getattr(self, '_current_lang', 'en')} → {target}")
+        self._current_lang = target
 
     def _get_current_voice(self) -> tuple[object, str] | None:
         """Get the currently active PiperVoice based on language setting."""
@@ -294,19 +286,29 @@ class PiperTTSClient:
 
     def _detect_text_language(self, text: str) -> str | None:
         """
-        Lightweight language detection from text using langdetect.
+        Lightweight language detection from text using keyword heuristics & langdetect.
         Returns 'id' or 'en', or None if detection fails.
-
-        Note: langdetect is unreliable on very short strings (< ~40 chars).
-        Use the response-level accumulation logic in synthesize_chunk instead
-        of calling this directly on short chunks.
         """
+        if not text:
+            return None
+
+        # Check for common Indonesian words before relying on naive langdetect n-grams
+        id_keywords = {
+            "saya", "kamu", "dengan", "senang", "halo", "nama", "terima", "kasih",
+            "apa", "bisa", "ini", "itu", "yang", "dan", "untuk", "ada", "bicarakan",
+            "perkenalkan", "diri", "hari", "merasa", "teman", "setia", "sekali", "baik"
+        }
+        import re
+        words = set(re.findall(r'\b\w+\b', text.lower()))
+        if len(words.intersection(id_keywords)) >= 1:
+            return "id"
+
         try:
             from langdetect import detect, DetectorFactory
             # Seed for deterministic results across runs
             DetectorFactory.seed = 0
             detected = detect(text)
-            if detected in ("id", "ms"):  # Malay is close to Indonesian
+            if detected in ("id", "ms", "tl", "so", "jw", "su"):  # Include regional/misclassified codes
                 return "id"
             return "en"
         except Exception:
@@ -456,30 +458,40 @@ class PiperTTSClient:
 
             if chunk is None:
                 # End-of-stream sentinel — one complete response has finished.
-                # Reset the language accumulator so the next response can
-                # re-detect its own language from scratch.
+                # Reset the language accumulator and turn lock so the next response
+                # can update its voice language cleanly.
                 self._response_text_acc = ""
                 self._response_lang_locked = False
-                await self.audio_queue.put(None)
+                self._stt_lang_locked = False
+
+                # Only forward the sentinel to audio_queue if we're NOT
+                # in an interrupted state. This avoids sending spurious
+                # PLAYBACK_FINISHED events from the old (interrupted)
+                # response that would confuse the pipeline state.
+                if not interrupt_event.is_set():
+                    await self.audio_queue.put(None)
+                    log.debug("[TTS] Forwarded end-of-stream sentinel to audio queue")
+                else:
+                    log.debug("[TTS] Discarded end-of-stream sentinel (interrupt active)")
+
                 tts_chunk_queue.task_done()
                 continue
 
             if interrupt_event.is_set():
+                log.debug(f"[TTS] Skipping chunk (interrupt active): {chunk[:40]!r}...")
                 tts_chunk_queue.task_done()
                 continue
 
             try:
-                log.debug(f"[TTS] Synthesizing: {chunk!r}")
-
                 audio = await self.synthesize_chunk(chunk)
 
                 if audio is not None and not interrupt_event.is_set():
-
                     await self.audio_queue.put(audio)
-
                     log.debug(
                         f"[TTS] → Audio queue ({len(audio)} samples)"
                     )
+                elif interrupt_event.is_set():
+                    log.debug("[TTS] Discarded synthesized audio (interrupt set during synthesis)")
 
             except Exception as worker_error:
                 log.error(

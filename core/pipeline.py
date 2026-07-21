@@ -248,13 +248,10 @@ class SorachioPipeline:
         """Start all workers and run until shutdown."""
         loop = asyncio.get_event_loop()
 
-        # Start audio capture (uses threads internally)
-        self._capture.start(loop)
-
         # Subscribe to playback-finished to unmute the mic
         self.bus.subscribe(EventType.PLAYBACK_FINISHED, self._on_playback_finished)
 
-        # Launch async worker tasks
+        # Launch async worker tasks (playback must run for greeting)
         self._tasks = [
             asyncio.create_task(self._stt_worker(), name="STTWorker"),
             asyncio.create_task(self._cognitive_worker(), name="CognitiveWorker"),
@@ -262,37 +259,36 @@ class SorachioPipeline:
             asyncio.create_task(self._playback.run(), name="PlaybackWorker"),
         ]
 
-        # Startup greeting
+        # ── Startup greeting (BEFORE starting mic) ──────────────────────
+        # The mic capture is NOT started yet, so there is zero chance of
+        # Sorachio hearing its own greeting through the speakers.
         if self.settings.pipeline.startup_greeting and self._tts._available:
             msg = self.settings.pipeline.startup_message
             log.info(f"[Pipeline] Greeting: {msg!r}")
-            # Mute during greeting playback to avoid capturing TTS output
-            self._capture.mute()
-            
-            # Temporarily disable interruption callback so the greeting does not interrupt itself
-            old_interrupt_callback = self._capture.interrupt_callback
-            self._capture.interrupt_callback = None
-            
+
             greeting_done = asyncio.Event()
-            
+
             async def _on_greeting_done(event_data) -> None:
                 greeting_done.set()
-                
+
             self.bus.subscribe(EventType.PLAYBACK_FINISHED, _on_greeting_done)
-            
+
             try:
                 await self._tts.speak(msg)
                 # Wait for the greeting playback to actually finish completely
                 try:
-                    await asyncio.wait_for(greeting_done.wait(), timeout=10.0)
+                    await asyncio.wait_for(greeting_done.wait(), timeout=15.0)
                 except asyncio.TimeoutError:
                     log.warning("[Pipeline] Startup greeting playback timeout")
             finally:
                 self.bus.unsubscribe(EventType.PLAYBACK_FINISHED, _on_greeting_done)
-                # Restore the interruption callback for regular turns
-                self._capture.interrupt_callback = old_interrupt_callback
-                # Ensure mic is unmuted for normal user input after greeting finishes
-                self._capture.unmute()
+
+            # Let speaker reverb / room echo die down before opening the mic
+            await asyncio.sleep(0.5)
+            log.info("[Pipeline] Greeting complete — starting mic capture")
+
+        # ── NOW start audio capture (mic is clean, no greeting leak) ────
+        self._capture.start(loop)
 
         log.info("[Pipeline] Running — speak into your microphone")
         log.info("[Pipeline] Press Ctrl+C to stop")
@@ -324,12 +320,42 @@ class SorachioPipeline:
                 # Propagate detected language to TTS for voice routing
                 detected_lang = self._stt.last_detected_language
                 if detected_lang and hasattr(self._tts, 'set_language'):
-                    self._tts.set_language(detected_lang)
+                    self._tts.set_language(detected_lang, from_stt=True)
 
                 await self.bus.emit(
                     EventType.STT_RESULT, data=transcript, source="stt"
                 )
                 await self._cognitive_queue.put(transcript)
+
+    def _flush_queues(self) -> None:
+        """Drain stale data from TTS chunk queue and audio queue.
+
+        Must be called before starting a new response turn so that leftover
+        chunks from an interrupted response don't interfere.
+        """
+        flushed_tts = 0
+        while not self._tts_chunk_queue.empty():
+            try:
+                self._tts_chunk_queue.get_nowait()
+                self._tts_chunk_queue.task_done()
+                flushed_tts += 1
+            except asyncio.QueueEmpty:
+                break
+
+        flushed_audio = 0
+        while not self._audio_queue.empty():
+            try:
+                self._audio_queue.get_nowait()
+                self._audio_queue.task_done()
+                flushed_audio += 1
+            except asyncio.QueueEmpty:
+                break
+
+        if flushed_tts or flushed_audio:
+            log.info(
+                f"[Pipeline] Flushed stale queues: "
+                f"tts_chunks={flushed_tts}, audio={flushed_audio}"
+            )
 
     async def _cognitive_worker(self) -> None:
         """Worker: transcript → cognitive decision → personality pipeline."""
@@ -365,13 +391,17 @@ class SorachioPipeline:
                     self._capture.unmute()
                 continue
 
-            # Clear interrupt for new turn
-            self._interrupt_event.clear()
-
-            # Interrupt ongoing playback if needed
+            # ── Prepare for new turn ────────────────────────────────────
+            # 1. Stop any ongoing playback first
             if self._playback_active_event.is_set():
                 log.info("[Cognitive] Interrupting current playback for new turn")
                 self._playback.interrupt()
+
+            # 2. Clear the interrupt flag AFTER stopping playback
+            self._interrupt_event.clear()
+
+            # 3. Drain any stale chunks from previous (interrupted) turn
+            self._flush_queues()
 
             # Vision integration: capture snapshot if requested
             image_b64 = None
@@ -393,11 +423,13 @@ class SorachioPipeline:
             )
 
             # Generate streaming response
+            log.info("[Cognitive] Starting response generation")
             await self.bus.emit(EventType.RESPONSE_START, source="cognitive")
             response = await self._personality.generate_streaming(messages)
             await self.bus.emit(
                 EventType.RESPONSE_END, data=response, source="cognitive"
             )
+            log.info(f"[Cognitive] Response complete: {len(response)} chars")
 
             # -------------------------------------------------
             # Send response to CLI text mode callback
@@ -432,28 +464,44 @@ class SorachioPipeline:
         )
 
     async def _on_interrupt(self) -> None:
-        """Called when user speaks during playback."""
-        log.info("[Pipeline] Interrupt triggered")
+        """Called when user speaks during playback (barge-in).
+
+        Flow:
+        1. Signal the interrupt to stop generation + TTS synthesis
+        2. Stop audio playback immediately
+        3. Unmute mic so barge-in speech is captured
+        4. Drain stale queues (cognitive worker will drain again for safety)
+        """
+        log.info("[Pipeline] ══ INTERRUPT TRIGGERED ══")
+
+        # 1. Signal interrupt — stops personality generation + TTS synthesis
         self._interrupt_event.set()
+
+        # 2. Stop playback — calls sd.stop() and drains audio_queue
         self._playback.interrupt()
-        
-        # Unmute the mic immediately so the barge-in speech can be captured
+
+        # 3. Unmute the mic so the barge-in speech can be captured
         if self._capture:
             self._capture.unmute()
-        
-        # Inject interruption metadata into STM
+
+        # 4. Inject interruption metadata into STM
         if self._stm:
             await self._stm.mark_last_interrupted()
 
-        # Clear TTS chunk queue
+        # 5. Drain stale TTS text chunks left from the interrupted response
+        flushed = 0
         while not self._tts_chunk_queue.empty():
             try:
                 self._tts_chunk_queue.get_nowait()
                 self._tts_chunk_queue.task_done()
+                flushed += 1
             except asyncio.QueueEmpty:
                 break
+        if flushed:
+            log.info(f"[Pipeline] Drained {flushed} stale TTS chunks")
 
         await self.bus.emit(EventType.INTERRUPT, source="pipeline")
+        log.info("[Pipeline] ══ INTERRUPT COMPLETE ══")
 
     async def inject_text(self, text: str) -> None:
         """
@@ -464,6 +512,7 @@ class SorachioPipeline:
 
     async def _on_playback_finished(self, event) -> None:
         """Called when TTS playback reaches the end-of-stream sentinel."""
+        log.debug("[Pipeline] PLAYBACK_FINISHED → unmuting mic")
         if self._capture:
             self._capture.unmute()
 
